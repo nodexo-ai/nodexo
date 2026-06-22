@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nodexo"
+version = "0.1.0"
+description = "Decentralized GPU compute marketplace on Bittensor"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    # 10.3+ pulls async-substrate-interface 2.x, which raises a hard conflict
+    # error if `scalecodec` is also installed (via substrate-interface). Pinning
+    # to <10.3 keeps the older async-substrate-interface 1.6.x that coexists
+    # with scalecodec. When we migrate `from substrateinterface import Keypair`
+    # uses to `bittensor.Keypair` we can lift this pin.
+    "bittensor>=8.0.0,<10.3",
+    "bittensor-cli==9.20.0",
+    "web3>=7.0.0",
+    "eth-account>=0.13.0",
+    "eth-abi>=5.0.0",
+    "substrate-interface>=1.7.0",
+    "SQLAlchemy>=2.0.0",
+    "psycopg2-binary>=2.9.9",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "aiohttp>=3.9.0",
+    "httpx>=0.28.0",
+    "pynvml>=11.5.0",
+    "psutil>=5.9.0",
+    "numpy>=1.24.0",
+    "pydantic>=2.0.0",
+    "boto3>=1.34.0",
+    "setuptools~=70.0",
+]
+
+[project.optional-dependencies]
+gpu = ["torch>=2.10,<2.11"]
+
+[project.scripts]
+nodexo = "cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["common*", "neurons*", "zkgemm*", "cli*"]

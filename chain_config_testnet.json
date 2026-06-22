@@ -1,0 +1,12 @@
+{
+  "chain_id": 945,
+  "netuid": 468,
+  "compute_registry_deploy_block": 7402212,
+  "compute_registry_address": "0x0247f3Dd717c6b7731e551d75EF89e7eD92a96A0",
+  "validator_registry_address": "0x9c2Dd87ddAaC50E972d352DDaca2ba1cf4aaC35A",
+  "collateral_manager_address": "0x0DE10Dbf3dF338c863943773A6D18A45DAA286b2",
+  "subnet_config_address": "0x465623520524B7Bf2E257b790F9835C9eA8eFDC1",
+  "payment_gateway_address": "0x0C002997e743240224bf28BA15e66ECC63427Fa6",
+  "payment_gateway_deploy_block": 7402223,
+  "mock": false
+}

@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.so
+*.egg
+
+# CUDA build artifacts
+zkgemm/cuda/build/
+zkgemm/cuda/*.so
+
+# Virtual environments
+.venv/
+.venv*/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+*.key
+wallets/
+
+# Pytest
+.pytest_cache/
+
+# Database
+*.db
+*.sqlite3
+
+# Foundry / Hardhat build artifacts
+contracts/out/build-info/
+contracts/cache/
