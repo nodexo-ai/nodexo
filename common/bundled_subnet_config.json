@@ -14,6 +14,7 @@
   },
   "conviction": {
     "allowance_enabled": true,
+    "max_counted_alpha_per_account": 10000,
     "max_usdc_per_day_per_account": 0,
     "min_alpha": 0,
     "pool_fraction": 0.5,
@@ -78,8 +79,7 @@
     "stake_requirement_multiplier": 24,
     "timing_grace_consecutive_count": 2,
     "timing_grace_count": 3,
-    "timing_grace_window_s": 3600,
-    "timing_min_delta_fraction": 0.55
+    "timing_grace_window_s": 3600
   },
   "timing_models": {
     "NVIDIA A100 80GB PCIe": {
@@ -498,11 +498,11 @@
       "wall_grace": 30
     }
   },
-  "updated_at": "2026-06-23T09:20:00.000Z",
-  "version": 32,
+  "updated_at": "2026-06-23T15:58:37.000Z",
+  "version": 35,
   "weights": {
     "burn_uid": 0,
-    "emission_burn_fraction": 1,
+    "emission_burn_fraction": 0.8,
     "set_weights_interval_blocks": 360
   }
 }

@@ -91,7 +91,7 @@ class CanaryRuntimeConfig:
 @dataclass(frozen=True)
 class WeightsRuntimeConfig:
     set_weights_interval_blocks: int = 360
-    emission_burn_fraction: float = 1.0
+    emission_burn_fraction: float = 0.8
     burn_uid: int | None = None
 
 
@@ -376,7 +376,7 @@ def _parse_weights(raw: Any) -> WeightsRuntimeConfig:
         emission_burn_fraction=_coerce_float(
             raw.get("emission_burn_fraction"),
             name="weights.emission_burn_fraction",
-            default=1.0,
+            default=0.8,
             min_value=0.0,
             max_value=1.0,
         ),
