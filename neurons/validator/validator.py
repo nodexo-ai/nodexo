@@ -3457,7 +3457,7 @@ async def _weight_setting_loop(rpc, wallet, netuid):
             if total > 0:
                 uid_scores = {uid: score / total for uid, score in uid_scores.items()}
 
-            burn_fraction = max(0.0, min(0.95, float(weights_cfg.emission_burn_fraction)))
+            burn_fraction = max(0.0, min(1.0, float(weights_cfg.emission_burn_fraction)))
             if burn_fraction > 0 and uid_scores:
                 try:
                     n_uids = int(mg.n.item())

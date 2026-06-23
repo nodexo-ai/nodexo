@@ -497,11 +497,11 @@
       "wall_grace": 30
     }
   },
-  "updated_at": "2026-06-18T13:33:56.000Z",
-  "version": 30,
+  "updated_at": "2026-06-23T09:30:00.000Z",
+  "version": 31,
   "weights": {
     "burn_uid": 0,
-    "emission_burn_fraction": 0.9,
+    "emission_burn_fraction": 1,
     "set_weights_interval_blocks": 360
   }
 }
