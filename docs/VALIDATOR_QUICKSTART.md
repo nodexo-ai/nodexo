@@ -115,6 +115,8 @@ Postgres config uses this shape:
 NODEXO_VALIDATOR_DB_URL=postgresql+psycopg2://nodexo:REDACTED@127.0.0.1:5432/nodexo_validator
 DB_URL=postgresql+psycopg2://nodexo:REDACTED@127.0.0.1:5432/nodexo_validator
 VALIDATOR_REQUIRE_POSTGRES=1
+VALIDATOR_DB_PRUNE_ENABLED=1
+VALIDATOR_RETENTION_PROFILE=minimal
 ```
 
 For managed or external Postgres, rerun setup with `--db-url` or edit the env
@@ -124,6 +126,9 @@ explicit setup opt-in:
 ```bash
 bash scripts/setup_validator.sh --sqlite
 ```
+
+Set `VALIDATOR_RETENTION_PROFILE=extended` for validators that need longer local
+telemetry.
 
 ## 4. Choose Validator Role
 

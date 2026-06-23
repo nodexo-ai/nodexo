@@ -2461,6 +2461,7 @@ def prune_validator_db(
     *,
     backup_dir: str = "",
     proof_retention_days: int | None = None,
+    receipt_retention_days: int | None = None,
     monitor_retention_days: int | None = None,
     rental_window_retention_days: int | None = None,
     sybil_flag_retention_days: int | None = None,
@@ -2473,6 +2474,26 @@ def prune_validator_db(
     """
     from datetime import timedelta
 
+    profile = os.environ.get("VALIDATOR_RETENTION_PROFILE", "minimal").strip().lower()
+    if profile in {"extended", "normal", "standard"}:
+        defaults = {
+            "proof": 14,
+            "receipt": 3,
+            "monitor": 7,
+            "rental_window": 90,
+            "sybil_flag": 90,
+            "idempotency": 30,
+        }
+    else:
+        defaults = {
+            "proof": 3,
+            "receipt": 1,
+            "monitor": 1,
+            "rental_window": 30,
+            "sybil_flag": 30,
+            "idempotency": 7,
+        }
+
     def _days(name: str, default: int, value: int | None) -> int:
         if value is not None:
             return int(value)
@@ -2481,11 +2502,12 @@ def prune_validator_db(
         except (TypeError, ValueError):
             return default
 
-    proof_days = _days("VALIDATOR_PROOF_RETENTION_DAYS", 14, proof_retention_days)
-    monitor_days = _days("VALIDATOR_MONITOR_RETENTION_DAYS", 7, monitor_retention_days)
-    window_days = _days("VALIDATOR_RENTAL_WINDOW_RETENTION_DAYS", 90, rental_window_retention_days)
-    flag_days = _days("VALIDATOR_SYBIL_FLAG_RETENTION_DAYS", 90, sybil_flag_retention_days)
-    idem_days = _days("VALIDATOR_IDEMPOTENCY_RETENTION_DAYS", 30, idempotency_retention_days)
+    proof_days = _days("VALIDATOR_PROOF_RETENTION_DAYS", defaults["proof"], proof_retention_days)
+    receipt_days = _days("VALIDATOR_PROOF_RECEIPT_RETENTION_DAYS", defaults["receipt"], receipt_retention_days)
+    monitor_days = _days("VALIDATOR_MONITOR_RETENTION_DAYS", defaults["monitor"], monitor_retention_days)
+    window_days = _days("VALIDATOR_RENTAL_WINDOW_RETENTION_DAYS", defaults["rental_window"], rental_window_retention_days)
+    flag_days = _days("VALIDATOR_SYBIL_FLAG_RETENTION_DAYS", defaults["sybil_flag"], sybil_flag_retention_days)
+    idem_days = _days("VALIDATOR_IDEMPOTENCY_RETENTION_DAYS", defaults["idempotency"], idempotency_retention_days)
 
     summary: dict[str, int] = {}
 
@@ -2498,6 +2520,8 @@ def prune_validator_db(
             "proof_results",
             backup_dir,
         )
+    if receipt_days > 0:
+        cutoff = datetime.utcnow() - timedelta(days=receipt_days)
         summary["proof_receipts"] = _backup_and_prune_query(
             db,
             ProofReceipt,
