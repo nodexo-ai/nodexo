@@ -168,8 +168,14 @@ registers that EVM identity, registers the executor, renews its lease, reports
 hardware, and starts proof generation.
 
 The hotkey EVM mirror needs a small TAO balance for EVM registration and
-executor lease transactions. The helper derives the mirror address from the
-hotkey and funds it from the coldkey:
+executor lease transactions. Check the derived EVM address and SS58 mirror:
+
+```bash
+python scripts/show_evm_info.py --wallet nodexo_miner --hotkey default \
+  --subtensor-network test
+```
+
+Then fund it from the coldkey:
 
 ```bash
 .venv/bin/nodexo --wallet nodexo_miner --hotkey default \

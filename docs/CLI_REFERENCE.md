@@ -190,6 +190,7 @@ trusted operator networks.
 ## Funding
 
 ```bash
+python scripts/show_evm_info.py --wallet <coldkey> --hotkey <hotkey>
 nodexo fund --wallet <coldkey> --hotkey <hotkey> --amount 1.0
 ```
 

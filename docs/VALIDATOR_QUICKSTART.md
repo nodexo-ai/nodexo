@@ -172,6 +172,13 @@ VALIDATOR_NO_EVM=0
 NODEXO_VALIDATOR_DISCOVERY_MODE=evm
 ```
 
+Check the derived EVM address and SS58 mirror before funding:
+
+```bash
+python scripts/show_evm_info.py --wallet nodexo_vali --hotkey default \
+  --subtensor-network test
+```
+
 The default `auto` discovery mode resolves to `evm` for this role, so it does
 not also publish a native axon unless `NODEXO_VALIDATOR_DISCOVERY_MODE=both` is
 set explicitly. If both are intentionally published, miners prefer the
