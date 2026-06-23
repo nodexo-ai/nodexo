@@ -21,7 +21,8 @@
   },
   "network": {
     "rental_validator_hotkeys": [
-      "5D4Xrdsb5hyHTMa2FkqzCUM6nyA45iED83AUW7rtf5MbromZ"
+      "5D4Xrdsb5hyHTMa2FkqzCUM6nyA45iED83AUW7rtf5MbromZ",
+      "5D7FVSM1fJM56zHJuMBuQ5LH32mkLni52JonoeppFrezvyHy"
     ]
   },
   "pricing": {
@@ -497,8 +498,8 @@
       "wall_grace": 30
     }
   },
-  "updated_at": "2026-06-23T09:30:00.000Z",
-  "version": 31,
+  "updated_at": "2026-06-23T09:20:00.000Z",
+  "version": 32,
   "weights": {
     "burn_uid": 0,
     "emission_burn_fraction": 1,
