@@ -214,6 +214,15 @@ def _metagraph_validator_has_permit(mg, uid: int) -> bool:
         return False
 
 
+def _validator_uid(value) -> int:
+    if value is None:
+        return -1
+    try:
+        return int(value)
+    except Exception:
+        return -1
+
+
 def _validator_registry_endpoints_with_current_permit(validators: list, mg) -> list:
     """Filter ValidatorRegistry rows against the current metagraph permit set.
 
@@ -224,7 +233,7 @@ def _validator_registry_endpoints_with_current_permit(validators: list, mg) -> l
     kept = []
     for validator in validators or []:
         try:
-            uid = int(getattr(validator, "uid", -1) or -1)
+            uid = _validator_uid(getattr(validator, "uid", None))
             if not _metagraph_validator_has_permit(mg, uid):
                 continue
             kept.append(validator)
@@ -243,7 +252,7 @@ def _merge_validator_endpoints(primary: list, extra: list) -> list:
         )
         if not endpoint:
             continue
-        uid = int(getattr(validator, "uid", -1) or -1)
+        uid = _validator_uid(getattr(validator, "uid", None))
         if uid >= 0 and uid in seen_uids:
             continue
         key = endpoint.lower()

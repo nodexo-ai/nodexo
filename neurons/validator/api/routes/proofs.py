@@ -308,6 +308,21 @@ def _verify_cached_ownership(
     existing_hotkey: str | None,
 ) -> None:
     """Verify hotkey ownership using only local cache state."""
+    if (
+        getattr(spec, "miner_registered", None) is not True
+        or getattr(spec, "uid_owner_match", None) is not True
+    ):
+        db_spec = _db_registry_executor_spec(executor_id)
+        if (
+            db_spec is not None
+            and bool(getattr(db_spec, "is_active", False))
+            and int(getattr(db_spec, "expires_at", 0) or 0) > int(time.time())
+            and getattr(db_spec, "miner_registered", None) is True
+            and getattr(db_spec, "uid_owner_match", None) is True
+        ):
+            spec = db_spec
+            _executor_info_cache[executor_id] = (time.time(), db_spec)
+
     owner = str(getattr(spec, "miner_address", "") or "")
     if not owner or owner.lower() == "0x0000000000000000000000000000000000000000":
         raise HTTPException(403, "Executor owner missing")

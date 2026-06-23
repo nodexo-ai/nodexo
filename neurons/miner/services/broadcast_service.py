@@ -23,6 +23,15 @@ import bittensor as bt
 from common.types import ProofCommitment, ProofRecipe, ValidatorEndpoint
 
 
+def _validator_uid(value) -> int:
+    if value is None:
+        return -1
+    try:
+        return int(value)
+    except Exception:
+        return -1
+
+
 def _env_float(name: str, default: float) -> float:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -209,7 +218,7 @@ class BroadcastService:
             endpoint = str(getattr(v, "proxy_endpoint", "") or "").strip().rstrip("/")
             if not endpoint or not _valid_endpoint_url(endpoint):
                 continue
-            uid = int(getattr(v, "uid", -1) or -1)
+            uid = _validator_uid(getattr(v, "uid", None))
             key = (endpoint.lower(), uid)
             if key in seen:
                 continue
@@ -229,7 +238,7 @@ class BroadcastService:
                 ValidatorEndpoint(
                     address=str(row.get("address") or ""),
                     proxy_endpoint=str(row.get("proxy_endpoint") or ""),
-                    uid=int(row.get("uid", -1) or -1),
+                    uid=_validator_uid(row.get("uid")),
                     is_active=bool(row.get("is_active", True)),
                 )
                 for row in rows or []
