@@ -240,6 +240,10 @@ class SubtensorRPC:
             self._hotkey_uid_index_at = self._metagraph_updated_at
         return self._hotkey_uid_index.get(hotkey_ss58)
 
+    def get_stake_info_for_coldkeys(self, coldkeys: list[str]):
+        with self._lock:
+            return self.subtensor.get_stake_info_for_coldkeys(list(coldkeys))
+
     def get_cached_uid_for_hotkey(
         self,
         hotkey_ss58: str,

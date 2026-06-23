@@ -3057,14 +3057,37 @@ async def _scoring_loop():
                 bt.logging.debug(f"scoring: chain query failed: {e}")
                 continue
 
-            # Pull the metagraph once per loop so stake lookups don't
+            from common.db import Executor
+
+            executor_hotkeys: dict[str, str] = {}
+            try:
+                executor_ids = [spec.executor_id for spec in execs]
+                if executor_ids:
+                    with db.session() as s:
+                        for executor_id, hotkey_ss58 in (
+                            s.query(Executor.executor_id, Executor.hotkey_ss58)
+                            .filter(Executor.executor_id.in_(executor_ids))
+                            .all()
+                        ):
+                            executor_hotkeys[str(executor_id)] = str(hotkey_ss58 or "")
+            except Exception as e:
+                bt.logging.debug(f"scoring: executor hotkey lookup failed: {e}")
+
+            # Pull the metagraph once per loop so UID/coldkey lookups don't
             # hammer the chain per-executor. get_metagraph is cached
             # (3-min TTL inside rpc) so this is effectively a dict read.
             mg = None
             stake_by_hotkey: dict[str, float] = {}
+            coldkey_by_hotkey: dict[str, str] = {}
             try:
                 mg = await asyncio.to_thread(app.state.rpc.get_metagraph, False)
                 hk_list = list(getattr(mg, "hotkeys", []))
+                ck_list = list(getattr(mg, "coldkeys", []))
+                if ck_list:
+                    coldkey_by_hotkey = {
+                        hk_list[i]: ck_list[i]
+                        for i in range(min(len(hk_list), len(ck_list)))
+                    }
                 stakes = getattr(mg, "stake", None)
                 if stakes is not None:
                     # mg.stake is subnet alpha stake (float) on lite metagraphs.
@@ -3075,25 +3098,45 @@ async def _scoring_loop():
             except Exception as e:
                 bt.logging.debug(f"scoring: metagraph stake lookup failed: {e}")
 
+            netuid = int(getattr(app.state.rpc, "netuid", os.environ.get("NETUID", "0") or 0))
+            stake_by_coldkey: dict[str, float] = {}
+            miner_coldkeys = sorted({
+                coldkey_by_hotkey.get(hotkey, "")
+                for hotkey in executor_hotkeys.values()
+                if hotkey
+            } - {""})
+            if miner_coldkeys:
+                try:
+                    stake_infos_by_coldkey = await asyncio.to_thread(
+                        app.state.rpc.get_stake_info_for_coldkeys,
+                        miner_coldkeys,
+                    )
+                    for coldkey_ss58, infos in (stake_infos_by_coldkey or {}).items():
+                        total = 0.0
+                        for info in infos or []:
+                            try:
+                                if int(getattr(info, "netuid", -1)) == netuid:
+                                    total += float(getattr(info, "stake", 0.0) or 0.0)
+                            except Exception:
+                                continue
+                        stake_by_coldkey[str(coldkey_ss58)] = total
+                except Exception as e:
+                    bt.logging.debug(f"scoring: coldkey stake lookup failed: {e}")
+
             contexts = []
-            required_by_hotkey: dict[str, float] = {}
+            required_by_owner: dict[str, float] = {}
+            stake_owner_by_executor: dict[str, str] = {}
             for spec in execs:
                 gpu_model = _name_for_hash(spec.gpu_model_hash)
-                # hotkey_ss58 lookup: from Executor row if heartbeat seen,
-                # otherwise empty (UID will resolve via chain in weight loop)
-                hotkey_ss58 = ""
-                try:
-                    from common.db import Executor
-                    with db.session() as s:
-                        row = s.query(Executor).filter_by(
-                            executor_id=spec.executor_id,
-                        ).first()
-                        if row is not None:
-                            hotkey_ss58 = row.hotkey_ss58 or ""
-                except Exception:
-                    pass
+                hotkey_ss58 = executor_hotkeys.get(spec.executor_id, "")
+                coldkey_ss58 = coldkey_by_hotkey.get(hotkey_ss58, "") if hotkey_ss58 else ""
+                stake_owner = coldkey_ss58 or hotkey_ss58
 
-                miner_stake_tao = stake_by_hotkey.get(hotkey_ss58, 0.0) if hotkey_ss58 else 0.0
+                miner_stake_tao = (
+                    stake_by_coldkey.get(coldkey_ss58, 0.0)
+                    if coldkey_ss58
+                    else stake_by_hotkey.get(hotkey_ss58, 0.0) if hotkey_ss58 else 0.0
+                )
 
                 ctx = build_context_from_db(
                     executor_id=spec.executor_id,
@@ -3109,16 +3152,18 @@ async def _scoring_loop():
                     endpoint=getattr(spec, "endpoint", "") or "",
                 )
                 contexts.append(ctx)
-                if ctx.hotkey_ss58 and ctx.is_active:
-                    required_by_hotkey[ctx.hotkey_ss58] = (
-                        required_by_hotkey.get(ctx.hotkey_ss58, 0.0)
+                if stake_owner and ctx.is_active:
+                    stake_owner_by_executor[ctx.executor_id] = stake_owner
+                    required_by_owner[stake_owner] = (
+                        required_by_owner.get(stake_owner, 0.0)
                         + stake_requirement_for_context(ctx, scoring_cfg)
                     )
 
             new_scores: dict = {}
             for ctx in contexts:
-                if ctx.hotkey_ss58:
-                    ctx.miner_required_stake_tao = required_by_hotkey.get(ctx.hotkey_ss58, 0.0)
+                stake_owner = stake_owner_by_executor.get(ctx.executor_id, ctx.hotkey_ss58)
+                if stake_owner:
+                    ctx.miner_required_stake_tao = required_by_owner.get(stake_owner, 0.0)
                 new_scores[ctx.executor_id] = score_one(ctx, cfg=scoring_cfg)
 
             global executor_scores
