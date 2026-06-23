@@ -207,6 +207,18 @@ def _healthy_executor_ids(executor_ids: list[str]) -> set[str]:
     return out
 
 
+def _positive_score_executor_ids(executor_ids: list[str]) -> set[str]:
+    """Executor ids with a positive validator score for public inventory."""
+    if not executor_ids or not scoring_data:
+        return set()
+    out: set[str] = set()
+    for executor_id in executor_ids:
+        score = scoring_data.get(executor_id)
+        if score is not None and getattr(score, "score", 0.0) > 0:
+            out.add(executor_id)
+    return out
+
+
 def _executor_hotkeys(executor_ids: list[str]) -> dict[str, str]:
     if db_instance is None or not executor_ids:
         return {}
@@ -322,6 +334,12 @@ async def marketplace_tiers(request: Request):
     # heartbeat/proof health fails.
     healthy = _healthy_executor_ids([e.executor_id for e in free])
     free = [e for e in free if e.executor_id in healthy]
+
+    # Match /rent's score gate. Chain-free and live is not enough: hard
+    # production gates such as insufficient alpha stake must keep the tier out
+    # of public renter inventory.
+    positive_score = _positive_score_executor_ids([e.executor_id for e in free])
+    free = [e for e in free if e.executor_id in positive_score]
 
     # Pull per-executor stats + hardware from the DB to enrich each tier
     # with renter-meaningful fields. Validator's local DB is updated on

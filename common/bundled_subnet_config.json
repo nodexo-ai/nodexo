@@ -75,7 +75,7 @@
     "stake_gpu_count_exponent": 1,
     "stake_grace_until_ts": 1781017982,
     "stake_per_score_tao": 1,
-    "stake_requirement_multiplier": 1,
+    "stake_requirement_multiplier": 24,
     "timing_grace_consecutive_count": 2,
     "timing_grace_count": 3,
     "timing_grace_window_s": 3600,

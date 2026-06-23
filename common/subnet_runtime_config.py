@@ -66,9 +66,9 @@ class ScoringRuntimeConfig:
     heartbeat_recency_s: int = 300
     idle_fraction: float = 0.20
     min_miner_stake_tao: float = 0.0
-    stake_per_score_tao: float = 0.0
+    stake_per_score_tao: float = 1.0
     stake_gpu_count_exponent: float = 1.0
-    stake_requirement_multiplier: float = 1.0
+    stake_requirement_multiplier: float = 24.0
     stake_grace_until_ts: float = 0.0
     min_reliability_samples: int = 5
     min_reliability_gate: float = 0.67
@@ -239,7 +239,7 @@ def _parse_scoring(raw: Any) -> ScoringRuntimeConfig:
         stake_per_score_tao=_coerce_float(
             raw.get("stake_per_score_tao"),
             name="scoring.stake_per_score_tao",
-            default=0.0,
+            default=1.0,
             min_value=0.0,
             max_value=10_000_000.0,
         ),
@@ -253,7 +253,7 @@ def _parse_scoring(raw: Any) -> ScoringRuntimeConfig:
         stake_requirement_multiplier=_coerce_float(
             raw.get("stake_requirement_multiplier"),
             name="scoring.stake_requirement_multiplier",
-            default=1.0,
+            default=24.0,
             min_value=0.0,
             max_value=1_000.0,
         ),
