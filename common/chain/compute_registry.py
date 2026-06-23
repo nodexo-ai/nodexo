@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import bittensor as bt
 from web3 import Web3
@@ -31,6 +31,18 @@ _abi_cache: list | None = None
 _RPC_THROTTLE_LOCK = threading.Lock()
 _RPC_THROTTLE_LAST_AT = 0.0
 
+
+class SubmittedTransactionTimeout(RuntimeError):
+    def __init__(self, label: str, tx_hash: str, tx_block: int = 0):
+        self.label = label or "tx"
+        self.tx_hash = tx_hash
+        self.tx_block = int(tx_block or 0)
+        block_detail = f", block={self.tx_block}" if self.tx_block else ""
+        super().__init__(
+            f"{self.label}: submitted (hash={tx_hash}{block_detail}) "
+            "but receipt timed out"
+        )
+
 _METAGRAPH_ABI = [
     {
         "inputs": [
@@ -48,19 +60,17 @@ _METAGRAPH_ABI = [
 def _rpc_min_interval_s() -> float:
     """Minimum spacing between EVM JSON-RPC calls in this process.
 
-    The public Bittensor EVM RPC is aggressively rate-limited. Multiple
-    ComputeRegistryClient instances live inside one validator process
-    (browse/rent, snapshot, event indexer), so the throttle is process-wide.
-    Operators with a private/local node can lower this via env.
+    Multiple ComputeRegistryClient instances live inside one validator process,
+    so any configured throttle is process-wide.
     """
     raw = os.environ.get(
         "COMPUTE_REGISTRY_RPC_MIN_INTERVAL_S",
-        os.environ.get("EVM_RPC_MIN_INTERVAL_S", "1.05"),
+        os.environ.get("EVM_RPC_MIN_INTERVAL_S", "0"),
     )
     try:
         return max(0.0, float(raw))
     except Exception:
-        return 1.05
+        return 0.0
 
 
 def _view_rpc_retries() -> int:
@@ -110,6 +120,15 @@ def _tx_hash_hex(value) -> str:
         return raw if raw.startswith("0x") else f"0x{raw}"
 
 
+def _bytes32_topic(value: bytes) -> str:
+    return "0x" + bytes(value).hex().rjust(64, "0")
+
+
+def _address_topic(value: str) -> str:
+    raw = Web3.to_checksum_address(value).removeprefix("0x").lower()
+    return "0x" + raw.rjust(64, "0")
+
+
 class ComputeRegistryClient:
     """Python client for interacting with the ComputeRegistry contract."""
 
@@ -123,6 +142,7 @@ class ComputeRegistryClient:
         self._batch_view_disabled_until: float = 0.0
         self._active_view_disabled_until: float = 0.0
         self._last_executor_total: int = 0
+        self._confirmed_tx_blocks: dict[str, int] = {}
         self._private_key = private_key
         self._account = None
         if private_key:
@@ -148,7 +168,16 @@ class ComputeRegistryClient:
     def address(self) -> str:
         return self._account.address if self._account else ""
 
-    def _send_and_wait(self, fn, gas: int, label: str = "") -> str:
+    def _send_and_wait(
+        self,
+        fn,
+        gas: int,
+        label: str = "",
+        *,
+        event_signature: str | None = None,
+        indexed_topics: list[str] | None = None,
+        state_confirm: Callable[[], bool] | None = None,
+    ) -> str:
         """Build, sign, send, wait. RAISES on revert (status != 1).
 
         Two-phase retry:
@@ -158,8 +187,8 @@ class ComputeRegistryClient:
           (b) AFTER submit (wait_for_transaction_receipt): poll-only retry
               on 429 — we already have a tx_hash and re-sending would
               create a duplicate tx, which can land in addition to the
-              first one (markRented twice = real bug we hit). Just keep
-              polling until the receipt arrives or we time out.
+              first one. Just keep polling until the receipt arrives or
+              operation-specific confirmation succeeds.
         """
         import time as _time
 
@@ -241,11 +270,16 @@ class ComputeRegistryClient:
         if tx_hash is None:
             raise last_exc or RuntimeError(f"{label}: failed to submit tx")
 
-        # Phase b: poll for receipt. No re-submission. If RPC keeps 429ing
-        # we eventually time out and raise — the tx is still in flight and
-        # the startup reconciler will pick up the resulting chain state
-        # next time the validator boots.
-        deadline = _time.time() + 90
+        # Phase b: poll for receipt and, for state-changing rental calls,
+        # accept the exact emitted event plus final contract state as
+        # confirmation. Some subtensor node modes expose logs before receipts.
+        raw_timeout = os.environ.get("EVM_TX_CONFIRM_TIMEOUT_S", "45")
+        try:
+            timeout_s = max(10.0, float(raw_timeout))
+        except Exception:
+            timeout_s = 45.0
+        deadline = _time.time() + timeout_s
+        submitted_hex = _tx_hash_hex(tx_hash)
         while _time.time() < deadline:
             try:
                 receipt = self._rpc_call(
@@ -253,33 +287,44 @@ class ComputeRegistryClient:
                     f"{label}:get_transaction_receipt",
                 )
                 if receipt is None:
-                    _time.sleep(2)
-                    continue
-                tx_hex = _tx_hash_hex(receipt.transactionHash)
-                if receipt.status != 1:
-                    raise RuntimeError(f"{label or fn.fn_name} reverted (tx={tx_hex})")
-                return tx_hex
+                    pass
+                else:
+                    tx_hex = _tx_hash_hex(receipt.transactionHash)
+                    if receipt.status != 1:
+                        raise RuntimeError(f"{label or fn.fn_name} reverted (tx={tx_hex})")
+                    return tx_hex
             except RuntimeError:
                 raise
-            except Exception as e:
-                msg = str(e)
-                # Only "not found" yet means keep polling; everything else
-                # we still retry briefly because the tx is in flight.
-                if "not found" in msg.lower() or "429" in msg or "timeout" in msg.lower():
-                    _time.sleep(3)
-                    continue
-                _time.sleep(2)
-        # Timed out waiting. The tx is still in flight. Raise so the caller
-        # 409s the user, BUT log the tx_hash so an operator can reconcile.
-        submitted_hex = _tx_hash_hex(tx_hash)
+            except Exception:
+                pass
+            if event_signature and indexed_topics is not None and state_confirm is not None:
+                tx_block = self.transaction_event_block(
+                    submitted_hex,
+                    event_signature,
+                    indexed_topics,
+                    lookback_blocks=96,
+                )
+                if tx_block > 0:
+                    try:
+                        if state_confirm():
+                            self._confirmed_tx_blocks[submitted_hex.lower()] = tx_block
+                            bt.logging.info(
+                                f"{label or 'tx'} event-confirmed "
+                                f"(tx={submitted_hex}, block={tx_block})"
+                            )
+                            return submitted_hex
+                    except Exception:
+                        pass
+            _time.sleep(2)
+        # Timed out waiting. The tx may still land, and some subtensor node
+        # modes expose the containing EVM block before they expose a
+        # transaction receipt. Surface the hash as structured data so
+        # operation-specific callers can confirm the resulting contract state.
         bt.logging.warning(
             f"{label or 'tx'} submitted as {submitted_hex} "
-            f"but receipt not received in time — may still land. Startup reconcile will fix."
+            "but receipt not received in time."
         )
-        raise RuntimeError(
-            f"{label or 'tx'}: submitted (hash={submitted_hex}) "
-            f"but receipt timed out (RPC may be throttled)"
-        )
+        raise SubmittedTransactionTimeout(label or "tx", submitted_hex, tx_block=0)
 
     # ── EVM Registration ───────────────────────────────────────────
 
@@ -340,16 +385,60 @@ class ComputeRegistryClient:
     # ── Rental state ───────────────────────────────────────────────
 
     def mark_rented(self, executor_id: bytes) -> str:
-        return self._send_and_wait(
-            self.contract.functions.markRented(executor_id),
-            gas=150_000, label="markRented",
-        )
+        try:
+            return self._send_and_wait(
+                self.contract.functions.markRented(executor_id),
+                gas=150_000, label="markRented",
+                event_signature="RentalStarted(bytes32,address)",
+                indexed_topics=[_bytes32_topic(executor_id), _address_topic(self.address)],
+                state_confirm=lambda: bool(
+                    (spec := self.get_executor_info(executor_id)) is not None
+                    and spec.is_rented
+                ),
+            )
+        except SubmittedTransactionTimeout as e:
+            tx_block = self.transaction_event_block(
+                e.tx_hash,
+                "RentalStarted(bytes32,address)",
+                [_bytes32_topic(executor_id), _address_topic(self.address)],
+            )
+            spec = self.get_executor_info(executor_id)
+            if tx_block > 0 and spec is not None and spec.is_rented:
+                self._confirmed_tx_blocks[_tx_hash_hex(e.tx_hash).lower()] = tx_block
+                bt.logging.warning(
+                    f"markRented state-confirmed after receipt timeout "
+                    f"(tx={e.tx_hash}, block={tx_block})"
+                )
+                return e.tx_hash
+            raise
 
     def mark_available(self, executor_id: bytes) -> str:
-        return self._send_and_wait(
-            self.contract.functions.markAvailable(executor_id),
-            gas=150_000, label="markAvailable",
-        )
+        try:
+            return self._send_and_wait(
+                self.contract.functions.markAvailable(executor_id),
+                gas=150_000, label="markAvailable",
+                event_signature="RentalEnded(bytes32,address)",
+                indexed_topics=[_bytes32_topic(executor_id), _address_topic(self.address)],
+                state_confirm=lambda: bool(
+                    (spec := self.get_executor_info(executor_id)) is not None
+                    and not spec.is_rented
+                ),
+            )
+        except SubmittedTransactionTimeout as e:
+            tx_block = self.transaction_event_block(
+                e.tx_hash,
+                "RentalEnded(bytes32,address)",
+                [_bytes32_topic(executor_id), _address_topic(self.address)],
+            )
+            spec = self.get_executor_info(executor_id)
+            if tx_block > 0 and spec is not None and not spec.is_rented:
+                self._confirmed_tx_blocks[_tx_hash_hex(e.tx_hash).lower()] = tx_block
+                bt.logging.warning(
+                    f"markAvailable state-confirmed after receipt timeout "
+                    f"(tx={e.tx_hash}, block={tx_block})"
+                )
+                return e.tx_hash
+            raise
 
     # ── Discovery (read-only) ──────────────────────────────────────
 
@@ -436,6 +525,82 @@ class ComputeRegistryClient:
             lambda: self.w3.eth.get_transaction_receipt(tx_hash),
             "getTransactionReceipt",
         )
+
+    def confirmed_transaction_block(self, tx_hash: str) -> int:
+        return int(self._confirmed_tx_blocks.get(_tx_hash_hex(tx_hash).lower(), 0))
+
+    def transaction_event_block(
+        self,
+        tx_hash: str,
+        event_signature: str,
+        indexed_topics: list[str],
+        lookback_blocks: int = 256,
+    ) -> int:
+        """Find an expected event for a submitted tx in one logs query."""
+        target = _tx_hash_hex(tx_hash).lower()
+        try:
+            head = self.block_number()
+        except Exception:
+            return 0
+        topic0 = Web3.to_hex(Web3.keccak(text=event_signature))
+        topics = [topic0, *indexed_topics]
+        from_block = max(0, head - max(1, int(lookback_blocks)))
+        try:
+            logs = self._rpc_call(
+                lambda: self.w3.eth.get_logs({
+                    "fromBlock": from_block,
+                    "toBlock": head,
+                    "address": self.contract.address,
+                    "topics": topics,
+                }),
+                "eth_getLogs",
+            )
+        except Exception:
+            return 0
+        for log in logs or []:
+            try:
+                log_tx = log.get("transactionHash", "")
+            except Exception:
+                log_tx = getattr(log, "transactionHash", "")
+            if _tx_hash_hex(log_tx).lower() == target:
+                try:
+                    return int(log.get("blockNumber", 0))
+                except Exception:
+                    return int(getattr(log, "blockNumber", 0) or 0)
+        return 0
+
+    def transaction_has_event(
+        self,
+        tx_hash: str,
+        block_number: int,
+        event_signature: str,
+        indexed_topics: list[str],
+    ) -> bool:
+        if block_number <= 0:
+            return False
+        target = _tx_hash_hex(tx_hash).lower()
+        topic0 = Web3.to_hex(Web3.keccak(text=event_signature))
+        topics = [topic0, *indexed_topics]
+        try:
+            logs = self._rpc_call(
+                lambda: self.w3.eth.get_logs({
+                    "fromBlock": int(block_number),
+                    "toBlock": int(block_number),
+                    "address": self.contract.address,
+                    "topics": topics,
+                }),
+                "eth_getLogs",
+            )
+        except Exception:
+            return False
+        for log in logs or []:
+            try:
+                if _tx_hash_hex(log.get("transactionHash", "")).lower() == target:
+                    return True
+            except Exception:
+                if _tx_hash_hex(getattr(log, "transactionHash", "")).lower() == target:
+                    return True
+        return False
 
     def evm_to_uid(self, address: str) -> int:
         checksum = Web3.to_checksum_address(address)

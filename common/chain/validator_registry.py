@@ -34,12 +34,12 @@ _RPC_THROTTLE_LAST_AT = 0.0
 def _rpc_min_interval_s() -> float:
     raw = os.environ.get(
         "VALIDATOR_REGISTRY_RPC_MIN_INTERVAL_S",
-        os.environ.get("EVM_RPC_MIN_INTERVAL_S", "1.05"),
+        os.environ.get("EVM_RPC_MIN_INTERVAL_S", "0"),
     )
     try:
         return max(0.0, float(raw))
     except Exception:
-        return 1.05
+        return 0.0
 
 
 def _rpc_retries() -> int:
@@ -234,7 +234,7 @@ class ValidatorRegistryClient:
         )
         raise RuntimeError(
             f"{label or 'tx'}: submitted (hash={submitted_hex}) "
-            "but receipt timed out (RPC may be throttled)"
+            "but receipt timed out"
         )
 
     def is_evm_registered(self, address: str) -> bool:

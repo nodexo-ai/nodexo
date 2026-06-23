@@ -743,6 +743,16 @@ def _block_of_tx(tx_hash: str) -> int:
         try:
             if not registry_client:
                 return 0
+            block_fn = getattr(registry_client, "confirmed_transaction_block", None)
+            if callable(block_fn):
+                block = int(block_fn(tx_hash) or 0)
+                if block > 0:
+                    return block
+        except Exception:
+            pass
+        try:
+            if not registry_client:
+                return 0
             block_number_fn = getattr(registry_client, "block_number", None)
             return int(
                 block_number_fn()
