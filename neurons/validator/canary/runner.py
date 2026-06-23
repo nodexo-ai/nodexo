@@ -315,8 +315,36 @@ class CanaryRunner:
             "container_image": "",
             "container_image_id": "",
         }
-        canary_rental_id: Optional[str] = None
+        canary_rental_id: Optional[str] = f"canary-{executor_id[:8]}-{int(time.time())}"[:32]
         rental_block = 0
+        requested_row_persisted = False
+        if self._db:
+            try:
+                from common.db import store_rental
+                store_rental(
+                    self._db,
+                    canary_rental_id,
+                    executor_id,
+                    executor_endpoint=executor_endpoint,
+                    container_name="",
+                    ssh_host="",
+                    ssh_port=0,
+                    ssh_user="",
+                    client_request_id=canary_rental_id,
+                    ttl_seconds=cfg.container_ttl_seconds,
+                    gpu_model=gpu_model_name,
+                    vram_mb=target_mb_per_gpu,
+                    gpu_count=gpu_count,
+                    price_per_gpu_hour_rao=0,
+                    renter_pubkey_fp="canary",
+                    start_block=0,
+                    status="requested",
+                )
+                requested_row_persisted = True
+            except Exception as e:
+                bt.logging.warning(
+                    f"canary[{executor_id[:8]}]: requested row write failed: {e}"
+                )
 
         # PHASE 1: markRented
         t_phase = time.perf_counter()
@@ -329,15 +357,27 @@ class CanaryRunner:
             )
         except Exception as e:
             result["reason"] = f"markRented failed: {e}"
+            if requested_row_persisted and "submitted" not in str(e).lower():
+                try:
+                    from common.db import terminate_rental
+                    terminate_rental(self._db, canary_rental_id, reason="orphan", end_block=0)
+                except Exception:
+                    pass
             self._cleanup_keydir(keydir)
             return result
         try:
             from neurons.validator.api.routes import rent as rent_route
-            canary_rental_id = f"canary-{executor_id[:8]}-{int(time.time())}"[:32]
             rental_block = await asyncio.to_thread(rent_route._block_of_tx, tx)
             rent_route.rental_state.record_rented(
                 executor_id, canary_rental_id, rental_block,
             )
+            if requested_row_persisted:
+                from common.db import Rental
+                with self._db.session() as s:
+                    row = s.query(Rental).filter_by(rental_id=canary_rental_id).first()
+                    if row is not None:
+                        row.status = "active"
+                        row.start_block = rental_block
         except Exception as e:
             bt.logging.warning(
                 f"canary[{executor_id[:8]}]: rental state record failed: {e}"
@@ -654,6 +694,8 @@ class CanaryRunner:
         finally:
             # PHASE 7: cleanup — always runs. Best-effort.
             t_phase = time.perf_counter()
+            mark_available_ok = False
+            available_block = 0
             if container_name:
                 try:
                     await self._orchestrator.terminate(
@@ -676,6 +718,7 @@ class CanaryRunner:
                     rent_route.rental_state.record_available(
                         canary_rental_id, available_block,
                     )
+                mark_available_ok = True
                 bt.logging.info(
                     f"canary[{executor_id[:8]}]: markAvailable tx={tx[:16] if tx else 'n/a'}"
                 )
@@ -687,6 +730,24 @@ class CanaryRunner:
                 try:
                     from neurons.validator.api.routes import rent as rent_route
                     rent_route._active_rentals.pop(canary_rental_id, None)
+                    if requested_row_persisted:
+                        if mark_available_ok:
+                            from common.db import terminate_rental
+                            terminate_rental(
+                                self._db,
+                                canary_rental_id,
+                                reason="canary",
+                                end_block=available_block,
+                            )
+                        else:
+                            from common.db import mark_rental_release_pending
+                            mark_rental_release_pending(
+                                self._db,
+                                canary_rental_id,
+                                reason="canary",
+                                error="canary markAvailable failed; retry pending",
+                                effective_ttl_seconds=cfg.container_ttl_seconds,
+                            )
                     if rent_route.chain_snapshot is not None:
                         rent_route.chain_snapshot.invalidate_executor(executor_id)
                 except Exception:
