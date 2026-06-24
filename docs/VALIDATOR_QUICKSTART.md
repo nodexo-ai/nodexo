@@ -28,10 +28,16 @@ the venv.
 
 - Ubuntu/Debian host with a stable public endpoint
 - Python 3.10+
+- 4 vCPU, 16 GB RAM, and 100 GB disk minimum
+- 8+ vCPU, 32+ GB RAM, and 200+ GB disk recommended
 - CPU-only is fine. A validator does not need an NVIDIA GPU, Docker GPU access,
   or `nvidia-smi`.
 - Synchronized system clock. Validator proof timing uses the host wall clock,
   so setup refuses to continue when NTP cannot be verified.
+- Dedicated Subtensor RPC. Use a local node or private RPC endpoint for
+  production validators; public RPC is not suitable for production operation.
+- No third-party API keys are required for normal proof verification and weight
+  setting.
 - Bittensor wallet/hotkey registered on the target subnet
 - Chain config file present in the repo root. The validator selects
   `chain_config_testnet.json` from `--subtensor-network test` and
@@ -319,7 +325,7 @@ curl -fsS http://127.0.0.1:9443/health
 pm2 logs vali-nodexo --lines 100
 
 # Optional chain diagnostics for the validator hotkey.
-# This calls public subtensor RPCs and can be rate-limited on testnet.
+# Use the validator's configured dedicated Subtensor endpoint for production checks.
 .venv/bin/nodexo --wallet nodexo_vali --hotkey default \
   fleet --chain-direct --subtensor-network test
 

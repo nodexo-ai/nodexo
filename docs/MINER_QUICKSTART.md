@@ -25,7 +25,10 @@ the venv.
 ## Prerequisites
 
 - Ubuntu/Debian GPU host
+- [Supported NVIDIA GPU](SUPPORTED_GPUS.md)
 - NVIDIA driver installed; `nvidia-smi` must work before setup
+- 4 CPU cores, 16 GB RAM, and 40 GB free Docker storage minimum
+- 8+ CPU cores, 32+ GB RAM, and 100+ GB free Docker storage recommended
 - Synchronized system clock; signed validator traffic uses a short freshness
   window and setup verifies NTP before miner startup
 - Public miner API port open, default `8091`
@@ -64,28 +67,9 @@ https://pub-ef00d9a98f734d94af3c8904eba0eb11.r2.dev/zkgemm/v0.1.2/manifest.json
 Override only for custom releases by setting `ZKGEMM_CUDA_MANIFEST_URL` to the
 custom manifest before running `scripts/setup_miner.sh`.
 
-Setup refuses to continue without `sysbox-runc`. A host without Sysbox can be
-used only for proof/timing calibration by setting:
-
-```bash
-NODEXO_ALLOW_MISSING_SYSBOX_FOR_CALIBRATION=1 bash scripts/setup_miner.sh
-```
-
-Calibration hosts can produce proofs, but validator scoring keeps them out of
-the rental marketplace until Sysbox is installed.
-
-Proof-only calibration hosts that cannot satisfy the minimum rental storage
-profile can be started explicitly with:
-
-```bash
-NODEXO_ALLOW_UNCALIBRATED_GPU=1 \
-NODEXO_PROOF_ONLY_CALIBRATION=1 \
-bash scripts/setup_miner.sh --skip-images --start
-```
-
-Do not use this mode for public rental miners. It skips rental storage and
-image readiness checks so the subnet operator can collect timing samples on
-temporary hardware.
+Setup refuses to continue without `sysbox-runc`. Public miners must provide a
+servable rental endpoint, the required warm images, and enough Docker storage
+for the minimum rental profile before they can enter the rental marketplace.
 
 Sysbox installation may reconfigure or restart Docker. If containers are
 already running, setup refuses to continue unless you explicitly allow the
