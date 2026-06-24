@@ -59,6 +59,130 @@ executor_scores = {}
 verify_pool = None
 
 
+def _coerce_chain_int(value) -> Optional[int]:
+    try:
+        if hasattr(value, "item"):
+            value = value.item()
+        return int(value)
+    except Exception:
+        return None
+
+
+def _metagraph_n(mg) -> int:
+    return _coerce_chain_int(getattr(mg, "n", 0)) or 0
+
+
+def _weight_sleep_seconds(
+    blocks_until_due: int,
+    *,
+    block_time_s: int = 12,
+    min_sleep_s: int = 15,
+    max_sleep_s: int = 300,
+) -> int:
+    if blocks_until_due <= 0:
+        return 0
+    return max(min_sleep_s, min(max_sleep_s, int(blocks_until_due) * block_time_s))
+
+
+def _metagraph_block(mg) -> int:
+    return _coerce_chain_int(getattr(mg, "block", 0)) or 0
+
+
+def _blocks_since_last_weight_update(mg, hotkey_ss58: str, current_block: int) -> Optional[int]:
+    if not hotkey_ss58:
+        return None
+    try:
+        hotkeys = list(getattr(mg, "hotkeys", []))
+        uid = hotkeys.index(hotkey_ss58)
+    except Exception:
+        return None
+    try:
+        last_update = _coerce_chain_int(getattr(mg, "last_update", [])[uid])
+    except Exception:
+        last_update = None
+    if last_update is None:
+        return None
+    return max(0, int(current_block) - last_update)
+
+
+def _last_weight_update_block(mg, hotkey_ss58: str) -> Optional[int]:
+    if not hotkey_ss58:
+        return None
+    try:
+        hotkeys = list(getattr(mg, "hotkeys", []))
+        uid = hotkeys.index(hotkey_ss58)
+    except Exception:
+        return None
+    try:
+        return _coerce_chain_int(getattr(mg, "last_update", [])[uid])
+    except Exception:
+        return None
+
+
+def _cached_chain_head(cache, *, max_age_s: float = 45.0) -> int:
+    if cache is None:
+        return 0
+    head_fn = getattr(cache, "head", None)
+    if not callable(head_fn):
+        return 0
+    try:
+        return int(head_fn(max_age_s=max_age_s) or 0)
+    except Exception:
+        return 0
+
+
+def _blocks_until_weight_due(
+    current_block: int,
+    last_update_block: Optional[int],
+    interval_blocks: int,
+) -> Optional[int]:
+    if last_update_block is None:
+        return None
+    return int(last_update_block) + int(interval_blocks) - int(current_block)
+
+
+def _weight_scheduler_needs_metagraph(
+    current_block: int,
+    last_update_block: Optional[int],
+    interval_blocks: int,
+    near_due_blocks: int,
+) -> bool:
+    blocks_until_due = _blocks_until_weight_due(
+        current_block,
+        last_update_block,
+        interval_blocks,
+    )
+    return blocks_until_due is None or blocks_until_due <= int(near_due_blocks)
+
+
+def _finalize_uid_scores(
+    uid_scores: dict[int, float],
+    *,
+    burn_uid: Optional[int],
+    n_uids: int,
+    burn_fraction: float,
+) -> dict[int, float]:
+    burn_uid_valid = burn_uid is not None and 0 <= int(burn_uid) < int(n_uids)
+    positive = {
+        int(uid): float(score)
+        for uid, score in uid_scores.items()
+        if float(score) > 0
+    }
+    total = sum(positive.values())
+    if total > 0:
+        normalized = {uid: score / total for uid, score in positive.items()}
+    elif burn_uid_valid:
+        return {int(burn_uid): 1.0}
+    else:
+        return {}
+
+    burn_fraction = max(0.0, min(1.0, float(burn_fraction)))
+    if burn_fraction > 0 and burn_uid_valid:
+        normalized = {uid: score * (1.0 - burn_fraction) for uid, score in normalized.items()}
+        normalized[int(burn_uid)] = normalized.get(int(burn_uid), 0.0) + burn_fraction
+    return normalized
+
+
 class RollingBeaconCache:
     """Validator-local block hash cache used by proof verification.
 
@@ -3414,7 +3538,7 @@ async def _metagraph_hotkey_cache_warmup(rpc) -> None:
 
 
 async def _weight_setting_loop(rpc, wallet, netuid):
-    """Set weights on Bittensor chain every tempo (~360 blocks / 72 min).
+    """Set weights on Bittensor chain when the validator's chain update is due.
 
     Resolution chain: executor_id → miner_address (from ComputeRegistry) → UID
     (from ComputeRegistry.evmToUid). Multiple executors under the same miner
@@ -3423,6 +3547,9 @@ async def _weight_setting_loop(rpc, wallet, netuid):
     from neurons.version import spec_version
 
     BLOCK_TIME = 12
+    POLL_SECONDS = 60
+    NEAR_DUE_BLOCKS = 20
+    HEAD_FALLBACK_SECONDS = 60
 
     def _commit_reveal_pending(message: object) -> bool:
         text = str(message or "")
@@ -3431,23 +3558,62 @@ async def _weight_setting_loop(rpc, wallet, netuid):
             or "Maximum commit limit reached" in text
         )
 
+    wallet_hotkey = getattr(getattr(wallet, "hotkey", None), "ss58_address", "") or ""
+    last_update_block: Optional[int] = None
+    last_head_fallback_at = 0.0
+
     while True:
         try:
             from common.subnet_runtime_config import get_subnet_runtime_config
             weights_cfg = get_subnet_runtime_config().weights
-            tempo_seconds = max(10, int(weights_cfg.set_weights_interval_blocks)) * BLOCK_TIME
-            await asyncio.sleep(tempo_seconds)
+            interval_blocks = max(10, int(weights_cfg.set_weights_interval_blocks))
+            interval_seconds = interval_blocks * BLOCK_TIME
 
-            if not executor_scores:
-                bt.logging.debug("No executor scores yet, skipping weight setting")
+            app_obj = globals().get("app")
+            cache = getattr(getattr(app_obj, "state", None), "beacon_cache", None)
+            current_block = _cached_chain_head(cache)
+            now = time.monotonic()
+            if current_block <= 0 and now - last_head_fallback_at >= HEAD_FALLBACK_SECONDS:
+                current_block = await asyncio.to_thread(rpc.get_current_block)
+                last_head_fallback_at = now
+            if current_block <= 0:
+                await asyncio.sleep(15)
+                continue
+
+            if not _weight_scheduler_needs_metagraph(
+                current_block,
+                last_update_block,
+                interval_blocks,
+                NEAR_DUE_BLOCKS,
+            ):
+                blocks_until_due = _blocks_until_weight_due(
+                    current_block,
+                    last_update_block,
+                    interval_blocks,
+                )
+                await asyncio.sleep(_weight_sleep_seconds(blocks_until_due or 1))
+                continue
+
+            mg = await asyncio.to_thread(rpc.get_metagraph, True)
+            current_block = max(int(current_block), _metagraph_block(mg))
+            chain_update_block = _last_weight_update_block(mg, wallet_hotkey)
+            if chain_update_block is None:
+                bt.logging.debug("Validator UID last_update unavailable; retrying weight scheduler")
+                await asyncio.sleep(POLL_SECONDS)
+                continue
+            last_update_block = int(chain_update_block)
+            blocks_since_last = max(0, int(current_block) - int(last_update_block))
+
+            if blocks_since_last < interval_blocks:
+                await asyncio.sleep(_weight_sleep_seconds(interval_blocks - blocks_since_last))
                 continue
 
             from neurons.validator.api.routes import browse
             if not browse.registry_client:
+                await asyncio.sleep(POLL_SECONDS)
                 continue
 
             registry = browse.registry_client
-            mg = await asyncio.to_thread(rpc.get_metagraph, True)
             try:
                 hotkey_to_uid = {
                     hotkey: idx
@@ -3460,7 +3626,7 @@ async def _weight_setting_loop(rpc, wallet, netuid):
             # Build address → UID lookup from the ComputeRegistry contract
             uid_scores: dict[int, float] = {}
 
-            for eid, es in executor_scores.items():
+            for eid, es in list(executor_scores.items()):
                 if es.score <= 0:
                     continue
                 try:
@@ -3491,40 +3657,25 @@ async def _weight_setting_loop(rpc, wallet, netuid):
                     bt.logging.debug(f"UID resolution failed for {eid[:16]}: {e}")
                     continue
 
+            burn_uid = (
+                int(weights_cfg.burn_uid)
+                if weights_cfg.burn_uid is not None
+                else await asyncio.to_thread(rpc.get_subnet_owner_uid)
+            )
+            n_uids = _metagraph_n(mg)
+            uid_scores = _finalize_uid_scores(
+                uid_scores,
+                burn_uid=burn_uid,
+                n_uids=n_uids,
+                burn_fraction=float(weights_cfg.emission_burn_fraction),
+            )
+
             if not uid_scores:
-                bt.logging.debug("No UID scores resolved, skipping weight setting")
-                continue
-
-            # Normalize miner weights to sum to 1, then redirect the configured
-            # fraction to the subnet-owner UID unless an explicit burn UID is
-            # set in runtime config.
-            total = sum(uid_scores.values())
-            if total > 0:
-                uid_scores = {uid: score / total for uid, score in uid_scores.items()}
-
-            burn_fraction = max(0.0, min(1.0, float(weights_cfg.emission_burn_fraction)))
-            if burn_fraction > 0 and uid_scores:
-                try:
-                    n_uids = int(mg.n.item())
-                except Exception:
-                    n_uids = 0
-                burn_uid = (
-                    int(weights_cfg.burn_uid)
-                    if weights_cfg.burn_uid is not None
-                    else await asyncio.to_thread(rpc.get_subnet_owner_uid)
+                bt.logging.warning(
+                    "No weight vector resolved; retrying after scheduler poll interval"
                 )
-                if burn_uid is None:
-                    bt.logging.warning("Skipping configured emission burn: subnet owner UID unresolved")
-                    burn_uid = -1
-                if 0 <= burn_uid < n_uids:
-                    for uid in list(uid_scores.keys()):
-                        uid_scores[uid] *= (1.0 - burn_fraction)
-                    uid_scores[burn_uid] = uid_scores.get(burn_uid, 0.0) + burn_fraction
-                else:
-                    bt.logging.warning(
-                        f"Skipping configured emission burn: burn_uid={burn_uid} "
-                        f"outside metagraph size {n_uids}"
-                    )
+                await asyncio.sleep(POLL_SECONDS)
+                continue
 
             uids = list(uid_scores.keys())
             weights = list(uid_scores.values())
@@ -3550,6 +3701,7 @@ async def _weight_setting_loop(rpc, wallet, netuid):
             top_uid = uids[weights.index(max(weights))] if weights else -1
             top_weight = max(weights) if weights else 0.0
             if success:
+                last_update_block = int(current_block)
                 bt.logging.info(
                     f"Weights set: OK ({len(uids)} UIDs, top: UID {top_uid} = {top_weight:.4f})"
                 )
@@ -3557,13 +3709,15 @@ async def _weight_setting_loop(rpc, wallet, netuid):
                 bt.logging.warning(
                     "Weights commit-reveal pending: Subtensor rejected this "
                     f"commit because unrevealed commits are still pending; "
-                    f"next attempt follows configured cadence ({tempo_seconds}s). "
+                    f"next attempt follows configured cadence ({interval_seconds}s). "
                     f"({len(uids)} UIDs, top: UID {top_uid} = {top_weight:.4f})"
                 )
+                await asyncio.sleep(interval_seconds)
             else:
                 bt.logging.error(
                     f"Weights set: FAILED ({len(uids)} UIDs, top: UID {top_uid} = {top_weight:.4f}): {message}"
                 )
+                await asyncio.sleep(POLL_SECONDS)
 
         except asyncio.CancelledError:
             break
