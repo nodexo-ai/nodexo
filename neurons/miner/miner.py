@@ -425,7 +425,11 @@ def _filter_validator_api_endpoints(validators: list) -> list:
         bt.logging.warning(
             f"Validator discovery role probe dropped {dropped} endpoint(s)"
         )
-    return kept
+    return ValidatorDiscoveryResult(
+        kept,
+        partial=unknown_native > 0,
+        inconclusive_native_count=unknown_native,
+    )
 
 
 def _startup_chain_ready_timeout_s() -> float:
@@ -1853,11 +1857,16 @@ async def lifespan(app: FastAPI):
                     "ValidatorRegistry endpoints for this refresh"
                 )
                 validators = []
-        return ValidatorDiscoveryResult(
-            _filter_validator_api_endpoints(
+        filtered = _filter_validator_api_endpoints(
                 _merge_validator_endpoints(validators, native_validators)
-            ),
+        )
+        return ValidatorDiscoveryResult(
+            filtered,
             registry_failed=registry_failed,
+            partial=bool(getattr(filtered, "partial", False)),
+            inconclusive_native_count=int(
+                getattr(filtered, "inconclusive_native_count", 0) or 0
+            ),
         )
 
     # ── Signing ────────────────────────────────────────────────

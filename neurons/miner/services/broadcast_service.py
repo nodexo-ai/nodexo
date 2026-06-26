@@ -273,6 +273,17 @@ class BroadcastService:
         now = time.time()
         self._cache_updated_at = now
         self._next_refresh_after = now + self._cache_ttl
+        if bool(getattr(validators, "partial", False)):
+            retry_s = min(self._cache_ttl, max(1.0, DISCOVERY_RETRY_S))
+            self._cache_updated_at = now - max(0.0, self._cache_ttl - retry_s)
+            self._next_refresh_after = now + retry_s
+            native_count = int(
+                getattr(validators, "inconclusive_native_count", 0) or 0
+            )
+            bt.logging.warning(
+                "Validator discovery was partial; scheduling retry in "
+                f"{retry_s:.0f}s (inconclusive_native={native_count})"
+            )
         self._refresh_failures = 0
         if save:
             self._save_validator_cache()
@@ -323,6 +334,17 @@ class BroadcastService:
         now = time.time()
         self._cache_updated_at = now
         self._next_refresh_after = now + self._cache_ttl
+        if bool(getattr(validators, "partial", False)):
+            retry_s = min(self._cache_ttl, max(1.0, DISCOVERY_RETRY_S))
+            self._cache_updated_at = now - max(0.0, self._cache_ttl - retry_s)
+            self._next_refresh_after = now + retry_s
+            native_count = int(
+                getattr(validators, "inconclusive_native_count", 0) or 0
+            )
+            bt.logging.warning(
+                "Validator discovery merge was partial; scheduling retry in "
+                f"{retry_s:.0f}s (inconclusive_native={native_count})"
+            )
         self._refresh_failures = 0
         if save:
             self._save_validator_cache()

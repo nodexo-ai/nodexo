@@ -110,9 +110,18 @@ class ValidatorEndpoint:
 class ValidatorDiscoveryResult(list):
     """Validator discovery list with source health metadata."""
 
-    def __init__(self, validators=None, *, registry_failed: bool = False):
+    def __init__(
+        self,
+        validators=None,
+        *,
+        registry_failed: bool = False,
+        partial: bool = False,
+        inconclusive_native_count: int = 0,
+    ):
         super().__init__(validators or [])
         self.registry_failed = bool(registry_failed)
+        self.partial = bool(partial)
+        self.inconclusive_native_count = max(0, int(inconclusive_native_count or 0))
 
 
 @dataclass
