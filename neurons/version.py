@@ -35,15 +35,15 @@ def _version_str(major: int, minor: int, patch: int) -> str:
 
 SPEC_MAJOR = 0
 SPEC_MINOR = 1
-SPEC_PATCH = 0
+SPEC_PATCH = 2
 
 MINER_MAJOR = 0
 MINER_MINOR = 1
-MINER_PATCH = 0
+MINER_PATCH = 1
 
 VALIDATOR_MAJOR = 0
 VALIDATOR_MINOR = 1
-VALIDATOR_PATCH = 1
+VALIDATOR_PATCH = 2
 
 spec_version: int = _encode(SPEC_MAJOR, SPEC_MINOR, SPEC_PATCH)
 miner_version: int = _encode(MINER_MAJOR, MINER_MINOR, MINER_PATCH)

@@ -42,6 +42,7 @@ from common.proof_schedule import (
     DEFAULT_BEACON_MAX_OFFSET_BLOCKS,
     DEFAULT_JITTER_SECONDS,
 )
+from common.types import ValidatorDiscoveryResult
 from neurons.miner.middleware.auth import ValidatorAuth
 
 # Logging is handled exclusively by bt.logging (loguru-based).
@@ -508,10 +509,25 @@ def _run_startup_chain_step(label: str, fn):
 
 def _startup_discover_validators(rpc, validator_registry, own_uid: int | None) -> list:
     validators = []
-    if validator_registry:
-        validators = validator_registry.get_active_validators(raise_on_error=True)
-
     mg = rpc.get_metagraph(False)
+
+    native_validators = _validator_axon_endpoints_from_metagraph(
+        mg,
+        exclude_uid=own_uid,
+    )
+    if validator_registry:
+        try:
+            validators = validator_registry.get_active_validators(
+                raise_on_error=not native_validators,
+            )
+        except Exception:
+            if not native_validators:
+                raise
+            bt.logging.debug(
+                "ValidatorRegistry startup discovery failed; using native "
+                "validator endpoints from metagraph"
+            )
+
     if validators:
         before = len(validators)
         validators = _validator_registry_endpoints_with_current_permit(validators, mg)
@@ -522,10 +538,6 @@ def _startup_discover_validators(rpc, validator_registry, own_uid: int | None) -
                 "current validator permit during startup discovery"
             )
 
-    native_validators = _validator_axon_endpoints_from_metagraph(
-        mg,
-        exclude_uid=own_uid,
-    )
     merged = _filter_validator_api_endpoints(
         _merge_validator_endpoints(validators, native_validators)
     )
@@ -1782,12 +1794,9 @@ async def lifespan(app: FastAPI):
 
     def discover_validators(*, raise_on_registry_error: bool = False):
         validators = []
-        if _validator_registry:
-            validators = _validator_registry.get_active_validators(
-                raise_on_error=raise_on_registry_error,
-            )
+        registry_failed = False
         # Mock mode: use --validator-url if provided
-        elif mock_mode and _mock_validator_url:
+        if mock_mode and _mock_validator_url:
             from common.types import ValidatorEndpoint
             validators = [ValidatorEndpoint(
                 address="mock_validator",
@@ -1815,21 +1824,40 @@ async def lifespan(app: FastAPI):
                     exclude_uid=getattr(app.state, "_pre_uid", None),
                 )
             except Exception as e:
-                if validators:
-                    bt.logging.warning(
-                        "Validator permit set unavailable; ignoring fresh "
-                        "ValidatorRegistry endpoints for this refresh"
-                    )
-                    validators = []
                 bt.logging.debug(f"validator permit discovery failed: {e}")
-        elif validators and not mock_mode:
-            bt.logging.warning(
-                "Validator permit set unavailable; ignoring fresh "
-                "ValidatorRegistry endpoints for this refresh"
-            )
-            validators = []
-        return _filter_validator_api_endpoints(
-            _merge_validator_endpoints(validators, native_validators)
+        if _validator_registry:
+            try:
+                validators = _validator_registry.get_active_validators(
+                    raise_on_error=True,
+                )
+            except Exception as e:
+                if raise_on_registry_error and not native_validators:
+                    raise
+                registry_failed = True
+                bt.logging.debug(f"ValidatorRegistry discovery failed: {e}")
+                validators = []
+            if mg is not None and validators:
+                before = len(validators)
+                validators = _validator_registry_endpoints_with_current_permit(
+                    validators, mg,
+                )
+                dropped = before - len(validators)
+                if dropped:
+                    bt.logging.warning(
+                        f"Dropped {dropped} ValidatorRegistry endpoint(s) "
+                        "without current validator permit"
+                    )
+            elif validators and not mock_mode:
+                bt.logging.warning(
+                    "Validator permit set unavailable; ignoring fresh "
+                    "ValidatorRegistry endpoints for this refresh"
+                )
+                validators = []
+        return ValidatorDiscoveryResult(
+            _filter_validator_api_endpoints(
+                _merge_validator_endpoints(validators, native_validators)
+            ),
+            registry_failed=registry_failed,
         )
 
     # ── Signing ────────────────────────────────────────────────
@@ -1856,9 +1884,7 @@ async def lifespan(app: FastAPI):
         )
     elif not mock_mode:
         await broadcast_service.refresh_until_ready(
-            discover_validators=lambda: discover_validators(
-                raise_on_registry_error=True,
-            ),
+            discover_validators=discover_validators,
         )
 
     # ── RPC callbacks for proof service ────────────────────────

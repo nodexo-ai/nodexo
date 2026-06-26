@@ -1075,6 +1075,9 @@ async def lifespan(app: FastAPI):
                         vali_registry.register(proxy_endpoint)
                         bt.logging.info(f"Registered on ValidatorRegistry: {proxy_endpoint}")
                     app.state.validator_registry_client = vali_registry
+                    app.state.validator_registry_evm_address = evm_account.address
+                    app.state.validator_registry_uid = int(uid)
+                    app.state.validator_registry_endpoint = proxy_endpoint
                 except Exception as e:
                     raise RuntimeError(f"ValidatorRegistry endpoint registration failed: {e}") from e
 
@@ -1226,6 +1229,29 @@ async def lifespan(app: FastAPI):
     offline_report_task = None
     endpoint_health_task = None
     endpoint_health = None
+    validator_registry_reconcile_task = None
+    validator_registry_client = getattr(app.state, "validator_registry_client", None)
+    validator_registry_evm_address = getattr(app.state, "validator_registry_evm_address", "")
+    validator_registry_endpoint = getattr(app.state, "validator_registry_endpoint", "")
+    validator_registry_uid = getattr(app.state, "validator_registry_uid", None)
+    if (
+        validator_registry_client is not None
+        and validator_registry_evm_address
+        and validator_registry_endpoint
+        and validator_registry_uid is not None
+        and _env_bool("VALIDATOR_REGISTRY_RECONCILE_ENABLED", "1")
+    ):
+        validator_registry_reconcile_task = asyncio.create_task(
+            _validator_registry_reconcile_loop(
+                validator_registry_client,
+                evm_address=validator_registry_evm_address,
+                uid=int(validator_registry_uid),
+                endpoint=validator_registry_endpoint,
+                interval_s=float(os.environ.get(
+                    "VALIDATOR_REGISTRY_RECONCILE_INTERVAL_S", "60",
+                )),
+            )
+        )
     if browse.registry_client is not None and not follower_mode:
         from neurons.validator.state.chain_snapshot import ChainSnapshot
         # Give the snapshot its OWN registry client so its periodic
@@ -1501,7 +1527,7 @@ async def lifespan(app: FastAPI):
     validator_registry_client = getattr(app.state, "validator_registry_client", None)
     if (
         validator_registry_client is not None
-        and _env_bool("VALIDATOR_DEACTIVATE_ON_SHUTDOWN", "1")
+        and _env_bool("VALIDATOR_DEACTIVATE_ON_SHUTDOWN", "0")
     ):
         timeout_s = float(os.environ.get("VALIDATOR_DEACTIVATE_SHUTDOWN_TIMEOUT_S", "45"))
         try:
@@ -1551,6 +1577,8 @@ async def lifespan(app: FastAPI):
         offline_report_task.cancel()
     if endpoint_health_task is not None:
         endpoint_health_task.cancel()
+    if validator_registry_reconcile_task is not None:
+        validator_registry_reconcile_task.cancel()
     if canary_task is not None:
         canary_task.cancel()
     if verify_pool is not None:
@@ -3333,6 +3361,34 @@ async def _validator_liveness_loop(
             break
         except Exception as e:
             bt.logging.debug(f"Validator liveness heartbeat failed: {e}")
+            await asyncio.sleep(interval_s)
+
+
+async def _validator_registry_reconcile_loop(
+    registry,
+    *,
+    evm_address: str,
+    uid: int,
+    endpoint: str,
+    interval_s: float = 60.0,
+) -> None:
+    interval_s = max(10.0, float(interval_s or 60.0))
+    while True:
+        try:
+            current = await asyncio.to_thread(registry.get_validator, evm_address)
+            needs_register = (
+                not getattr(current, "is_active", False)
+                or int(getattr(current, "uid", -1)) != int(uid)
+                or str(getattr(current, "proxy_endpoint", "") or "") != endpoint
+            )
+            if needs_register:
+                await asyncio.to_thread(registry.register, endpoint)
+                bt.logging.info(f"ValidatorRegistry reconciled endpoint: {endpoint}")
+            await asyncio.sleep(interval_s)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            bt.logging.warning(f"ValidatorRegistry reconcile failed: {e}")
             await asyncio.sleep(interval_s)
 
 

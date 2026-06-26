@@ -197,14 +197,10 @@ set explicitly. If both are intentionally published, miners prefer the
 The endpoint still has to pass the same current validator-permit gate as native
 axon discovery. If the UID cannot activate its registry/control authority, EVM
 write-mode startup exits instead of serving a misleading healthy API.
-Keep `VALIDATOR_DEACTIVATE_ON_SHUTDOWN=1` unless an operator is intentionally
-debugging registry writes. On normal shutdown the validator attempts to
-deactivate its `ValidatorRegistry` endpoint so miners do not keep discovering a
-dead EVM endpoint; miners also quarantine repeated endpoint failures as a
-defensive fallback. The generated PM2 ecosystem gives the validator a 60 second
-graceful-stop window, which is long enough for the default 45 second
-deactivation receipt wait. If you write a custom process manager config, keep
-that same relationship.
+`VALIDATOR_DEACTIVATE_ON_SHUTDOWN` defaults to `0`. EVM validators keep their
+`ValidatorRegistry` endpoint advertised across normal restarts and periodically
+reconcile it while running. Miners quarantine repeated endpoint failures as a
+defensive fallback.
 
 For low-resource validators that do not want to verify proofs locally, use
 follower mode instead.

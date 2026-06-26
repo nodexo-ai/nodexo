@@ -281,6 +281,56 @@ class BroadcastService:
         )
         return fresh
 
+    def merge_validator_cache(
+        self,
+        validators: list[ValidatorEndpoint],
+        *,
+        source: str = "discovery",
+        save: bool = True,
+    ) -> list[ValidatorEndpoint]:
+        """Merge newly discovered validators into the existing broadcast cache."""
+        fresh = self._clean_validator_list(validators)
+        if not fresh:
+            return list(self._validator_cache)
+
+        merged: list[ValidatorEndpoint] = []
+        by_uid: dict[int, ValidatorEndpoint] = {}
+        by_endpoint: dict[str, ValidatorEndpoint] = {}
+        for validator in list(self._validator_cache or []) + fresh:
+            endpoint = self._endpoint_key(validator)
+            uid = _validator_uid(getattr(validator, "uid", None))
+            if not endpoint:
+                continue
+            if uid >= 0 and uid in by_uid:
+                previous = by_uid[uid]
+                if (
+                    not _is_native_validator(previous)
+                    and _is_native_validator(validator)
+                ):
+                    continue
+                try:
+                    merged.remove(previous)
+                except ValueError:
+                    pass
+            elif endpoint in by_endpoint:
+                continue
+            by_uid[uid] = validator
+            by_endpoint[endpoint] = validator
+            merged.append(validator)
+
+        self._validator_cache = merged
+        self._prune_endpoint_health_state(merged)
+        now = time.time()
+        self._cache_updated_at = now
+        self._next_refresh_after = now + self._cache_ttl
+        self._refresh_failures = 0
+        if save:
+            self._save_validator_cache()
+        bt.logging.info(
+            f"Validator endpoint cache merged from {source}: {len(merged)} endpoint(s)"
+        )
+        return merged
+
     def current_validators(self) -> list[ValidatorEndpoint]:
         """Return currently usable non-quarantined validator endpoints."""
         return list(self._validators_for_broadcast())
@@ -625,18 +675,19 @@ class BroadcastService:
                     asyncio.to_thread(self._discover_validators),
                     timeout=DISCOVERY_TIMEOUT_S,
                 )
+                registry_failed = bool(getattr(fresh, "registry_failed", False))
                 fresh = self._clean_validator_list(fresh)
                 if fresh:
                     if (
-                        self._validator_cache
+                        registry_failed
+                        and self._validator_cache
                         and _has_evm_or_configured_validator(self._validator_cache)
                         and not _has_evm_or_configured_validator(fresh)
                     ):
-                        self._refresh_failures += 1
-                        self._next_refresh_after = now + self._next_retry_delay()
-                        bt.logging.warning(
-                            "Validator discovery returned native-only fallback while "
-                            "an EVM/configured validator cache exists; keeping current cache"
+                        self.merge_validator_cache(
+                            fresh,
+                            source="background native discovery",
+                            save=True,
                         )
                         return
                     self.set_validator_cache(
@@ -727,8 +778,20 @@ class BroadcastService:
                     asyncio.to_thread(discover),
                     timeout=DISCOVERY_TIMEOUT_S,
                 )
+                registry_failed = bool(getattr(fresh, "registry_failed", False))
                 fresh = self._clean_validator_list(fresh)
                 if fresh:
+                    if (
+                        registry_failed
+                        and self._validator_cache
+                        and _has_evm_or_configured_validator(self._validator_cache)
+                        and not _has_evm_or_configured_validator(fresh)
+                    ):
+                        return self.merge_validator_cache(
+                            fresh,
+                            source="startup native discovery",
+                            save=True,
+                        )
                     return self.set_validator_cache(
                         fresh,
                         source="startup discovery",

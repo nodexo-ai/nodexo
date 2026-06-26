@@ -188,6 +188,7 @@ module.exports = {
         // permit-gated for both paths. Set "both" only when intentionally
         // testing both discovery paths for one UID.
         NODEXO_VALIDATOR_DISCOVERY_MODE: "auto",
+        VALIDATOR_DEACTIVATE_ON_SHUTDOWN: "0",
         // Set to 1 for a read/verify validator that should not perform EVM
         // writes. This disables ValidatorRegistry registration, canaries,
         // rental control, and reportOffline while keeping proof verification
@@ -198,8 +199,8 @@ module.exports = {
       max_restarts: 5,
       min_uptime: "60s",
       restart_delay: 10000,
-      // Allow FastAPI lifespan cleanup to deactivate ValidatorRegistry before
-      // PM2 force-kills the process.
+      // Allow graceful FastAPI shutdown hooks to finish before PM2 force-kills
+      // the process.
       kill_timeout: 60000,
       merge_logs: true,
       log_date_format: "YYYY-MM-DD HH:mm:ss",

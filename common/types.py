@@ -107,6 +107,14 @@ class ValidatorEndpoint:
     is_active: bool
 
 
+class ValidatorDiscoveryResult(list):
+    """Validator discovery list with source health metadata."""
+
+    def __init__(self, validators=None, *, registry_failed: bool = False):
+        super().__init__(validators or [])
+        self.registry_failed = bool(registry_failed)
+
+
 @dataclass
 class ProofScore:
     """Per-executor proof score computed by the validator analyzer."""
