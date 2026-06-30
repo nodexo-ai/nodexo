@@ -84,7 +84,7 @@ from __future__ import annotations
 import calendar
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterable, Mapping, Optional
 
 from common.config import canonical_gpu_model_name
 from common.subnet_runtime_config import (
@@ -162,7 +162,7 @@ class ScoringContext:
     miner_uid: int | None = None          # metagraph UID when known
     endpoint: str = ""                    # registered executor endpoint
     miner_stake_tao: float = 0.0          # mg.stake[uid] in subnet alpha; 0 if unresolved
-    miner_required_stake_tao: float = 0.0 # aggregate hotkey requirement supplied by scoring loop
+    miner_required_stake_tao: float | None = None # aggregate owner requirement supplied by scoring loop
     pass_rate_1h: float = 1.0             # recent proof reliability
     pass_rate_24h: float = 1.0
     samples_1h: int = 0
@@ -189,7 +189,7 @@ class ScoringConfig:
     # DEFAULT_MIN_MINER_STAKE_TAO for the rationale.
     min_miner_stake_tao: float = DEFAULT_MIN_MINER_STAKE_TAO
     # Optional proportional stake gate. Required stake is aggregated per
-    # hotkey across all active executors:
+    # stake owner across all stake-eligible executors:
     #   stake_per_score_tao × per-GPU score × gpu_count^exponent × multiplier
     # The validator loop writes the aggregate into ctx.miner_required_stake_tao.
     # If called standalone, score_one computes the per-executor requirement.
@@ -268,7 +268,7 @@ class ScoringResult:
 
 
 def stake_requirement_for_context(ctx: ScoringContext, cfg: Optional[ScoringConfig] = None) -> float:
-    """Return this executor's contribution to the miner-hotkey stake floor.
+    """Return this executor's contribution to the stake-owner floor.
 
     The requirement intentionally uses un-discounted per-GPU score units, not
     the current renter quote multiplier, so testnet checkout discounts do not
@@ -290,14 +290,77 @@ def stake_requirement_for_context(ctx: ScoringContext, cfg: Optional[ScoringConf
 
 
 def effective_min_stake_tao(ctx: ScoringContext, cfg: Optional[ScoringConfig] = None) -> float:
-    """Combined flat and proportional miner-hotkey stake requirement."""
+    """Combined flat and proportional stake-owner requirement."""
     cfg = cfg or ScoringConfig()
     proportional = (
-        float(ctx.miner_required_stake_tao or 0.0)
-        if ctx.miner_required_stake_tao > 0
+        float(ctx.miner_required_stake_tao)
+        if ctx.miner_required_stake_tao is not None
         else stake_requirement_for_context(ctx, cfg)
     )
     return max(float(cfg.min_miner_stake_tao or 0.0), proportional)
+
+
+def stake_requirement_eligible(ctx: ScoringContext, cfg: Optional[ScoringConfig] = None) -> bool:
+    """Return whether this executor should contribute to the owner stake floor."""
+    cfg = cfg or ScoringConfig()
+    if not ctx.is_active:
+        return False
+    if policy_blacklist_reason(
+        ctx.executor_id,
+        hotkey_ss58=ctx.hotkey_ss58,
+        miner_address=ctx.miner_address,
+        miner_uid=ctx.miner_uid,
+        endpoint=ctx.endpoint,
+    ):
+        return False
+    if not is_timing_model_calibrated(ctx.gpu_model, ctx.gpu_count):
+        return False
+    age_proof = max(
+        0.0,
+        ctx.now_ts - (ctx.last_proof_valid_at or 0)
+        - float(ctx.validator_outage_since_proof_s or 0.0),
+    )
+    if ctx.last_proof_valid_at <= 0 or age_proof > cfg.proof_recency_s:
+        return False
+    if not ctx.rental_runtime_ok:
+        return False
+    age_hb = max(
+        0.0,
+        ctx.now_ts - (ctx.last_heartbeat_at or 0)
+        - float(ctx.validator_outage_since_heartbeat_s or 0.0),
+    )
+    if ctx.last_heartbeat_at <= 0 or age_hb > cfg.heartbeat_recency_s:
+        return False
+    if ctx.open_hard_flag_count > 0 or ctx.last_canary_status == "fail":
+        return False
+    if cfg.canary_required and ctx.last_canary_status != "pass":
+        return False
+
+    reliability_rates: list[float] = []
+    if ctx.samples_1h >= cfg.min_reliability_samples:
+        reliability_rates.append(max(0.0, min(1.0, ctx.pass_rate_1h)))
+    if ctx.samples_24h >= cfg.min_reliability_samples:
+        reliability_rates.append(max(0.0, min(1.0, ctx.pass_rate_24h)))
+    return not reliability_rates or min(reliability_rates) >= cfg.min_reliability_gate
+
+
+def aggregate_stake_requirements_by_owner(
+    contexts: Iterable[ScoringContext],
+    owner_by_executor: Mapping[str, str],
+    cfg: Optional[ScoringConfig] = None,
+) -> dict[str, float]:
+    """Aggregate proportional stake floors for currently stake-eligible capacity."""
+    cfg = cfg or ScoringConfig()
+    required_by_owner: dict[str, float] = {}
+    for ctx in contexts:
+        owner = owner_by_executor.get(ctx.executor_id, "")
+        if not owner or not stake_requirement_eligible(ctx, cfg):
+            continue
+        required_by_owner[owner] = (
+            required_by_owner.get(owner, 0.0)
+            + stake_requirement_for_context(ctx, cfg)
+        )
+    return required_by_owner
 
 
 def score_one(ctx: ScoringContext, cfg: Optional[ScoringConfig] = None) -> ScoringResult:
@@ -393,8 +456,8 @@ def score_one(ctx: ScoringContext, cfg: Optional[ScoringConfig] = None) -> Scori
     # per endpoint. Zero stake threshold disables the gate.
     required_stake = max(
         float(cfg.min_miner_stake_tao or 0.0),
-        float(ctx.miner_required_stake_tao or 0.0)
-        if ctx.miner_required_stake_tao > 0
+        float(ctx.miner_required_stake_tao)
+        if ctx.miner_required_stake_tao is not None
         else executor_required_stake,
     )
     stake_in_grace = (
@@ -492,7 +555,7 @@ def build_context_from_db(executor_id: str, hotkey_ss58: str, gpu_model: str,
                            gpu_count: int, is_rented: bool, is_active: bool,
                            db, now_ts: float,
                            miner_stake_tao: float = 0.0,
-                           miner_required_stake_tao: float = 0.0,
+                           miner_required_stake_tao: float | None = None,
                            miner_address: str = "",
                            miner_uid: int | None = None,
                            endpoint: str = "") -> ScoringContext:

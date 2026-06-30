@@ -5,9 +5,8 @@ auto-updates:
 
 ``spec_version``
     On-chain weight gating. Validators pass this as ``version_key`` to
-    ``subtensor.set_weights()``. The subnet owner sets the chain's
-    ``weights_version`` hyperparameter to the same value for breaking
-    protocol releases.
+    ``subtensor.set_weights()``. It tracks the highest role version so the
+    chain's ``weights_version`` can gate any miner or validator release.
 
 ``miner_version``
     Miner-side release gate. Miners running with auto-update only restart
@@ -33,21 +32,26 @@ def _version_str(major: int, minor: int, patch: int) -> str:
     return f"{major}.{minor}.{patch}"
 
 
-SPEC_MAJOR = 0
-SPEC_MINOR = 1
-SPEC_PATCH = 2
-
 MINER_MAJOR = 0
 MINER_MINOR = 1
 MINER_PATCH = 1
 
 VALIDATOR_MAJOR = 0
 VALIDATOR_MINOR = 1
-VALIDATOR_PATCH = 2
+VALIDATOR_PATCH = 3
 
-spec_version: int = _encode(SPEC_MAJOR, SPEC_MINOR, SPEC_PATCH)
 miner_version: int = _encode(MINER_MAJOR, MINER_MINOR, MINER_PATCH)
 validator_version: int = _encode(VALIDATOR_MAJOR, VALIDATOR_MINOR, VALIDATOR_PATCH)
+spec_version: int = max(miner_version, validator_version)
+
+if validator_version >= miner_version:
+    SPEC_MAJOR = VALIDATOR_MAJOR
+    SPEC_MINOR = VALIDATOR_MINOR
+    SPEC_PATCH = VALIDATOR_PATCH
+else:
+    SPEC_MAJOR = MINER_MAJOR
+    SPEC_MINOR = MINER_MINOR
+    SPEC_PATCH = MINER_PATCH
 
 version_str: str = _version_str(SPEC_MAJOR, SPEC_MINOR, SPEC_PATCH)
 miner_version_str: str = _version_str(MINER_MAJOR, MINER_MINOR, MINER_PATCH)

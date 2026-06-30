@@ -3189,7 +3189,7 @@ async def _scoring_loop():
 
             from neurons.validator.scoring.scorer import (
                 score_one, build_context_from_db, scoring_config_from_runtime,
-                stake_requirement_for_context,
+                aggregate_stake_requirements_by_owner,
             )
             from neurons.validator.api.routes.browse import _name_for_hash
 
@@ -3276,7 +3276,6 @@ async def _scoring_loop():
                     bt.logging.debug(f"scoring: coldkey stake lookup failed: {e}")
 
             contexts = []
-            required_by_owner: dict[str, float] = {}
             stake_owner_by_executor: dict[str, str] = {}
             for spec in execs:
                 gpu_model = _name_for_hash(spec.gpu_model_hash)
@@ -3304,12 +3303,14 @@ async def _scoring_loop():
                     endpoint=getattr(spec, "endpoint", "") or "",
                 )
                 contexts.append(ctx)
-                if stake_owner and ctx.is_active:
+                if stake_owner:
                     stake_owner_by_executor[ctx.executor_id] = stake_owner
-                    required_by_owner[stake_owner] = (
-                        required_by_owner.get(stake_owner, 0.0)
-                        + stake_requirement_for_context(ctx, scoring_cfg)
-                    )
+
+            required_by_owner = aggregate_stake_requirements_by_owner(
+                contexts,
+                stake_owner_by_executor,
+                scoring_cfg,
+            )
 
             new_scores: dict = {}
             for ctx in contexts:
