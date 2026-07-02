@@ -83,6 +83,16 @@ _port_failure_streaks: dict[str, int] = {}
 _CLIENT_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{8,128}$")
 
 
+def _is_canary_rental(rental_id: str, rental: dict | None = None) -> bool:
+    if rental and rental.get("kind") == "canary":
+        return True
+    if rental_id.startswith("canary-"):
+        return True
+    if rental:
+        return str(rental.get("client_request_id") or "").startswith("canary-")
+    return False
+
+
 def _env_int(name: str, default: int, min_value: int = 0) -> int:
     try:
         return max(min_value, int(os.environ.get(name, str(default))))
@@ -1535,7 +1545,7 @@ async def list_rentals(request: Request):
     now = time.time()
     out = []
     for rid, info in _active_rentals.items():
-        if info.get("kind") == "canary":
+        if _is_canary_rental(rid, info):
             continue
         # Snapshot data from DB (gpu_model, price snapshot) survives validator
         # restart and matches what the renter agreed to at rent time.
@@ -2000,7 +2010,7 @@ async def reconcile_on_startup() -> None:
                     bt.logging.warning(
                         f"reconcile: failed to cap legacy rental {rid[:8]}…: {e}"
                     )
-            _active_rentals[rid] = {
+            active_info = {
                 "executor_id": eid,
                 "executor_endpoint": r.get("executor_endpoint", spec.endpoint),
                 "container_name": r.get("container_name", ""),
@@ -2015,6 +2025,10 @@ async def reconcile_on_startup() -> None:
                 "release_requested_at": _parse_iso_ts(r.get("release_requested_at")) if r.get("release_requested_at") else 0,
                 "last_release_error": r.get("last_release_error") or "",
             }
+            if _is_canary_rental(rid, r):
+                active_info["kind"] = "canary"
+                active_info["client_request_id"] = r.get("client_request_id", "")
+            _active_rentals[rid] = active_info
             rental_state.record_rented(eid, rid, int(r.get("start_block") or 0))
             bt.logging.info(f"reconcile: rehydrated rental {rid[:8]}… on executor {eid[:16]}…")
             if r.get("status") == "release_pending":
@@ -2133,7 +2147,7 @@ async def orphan_sweeper(interval_s: float = 60.0) -> None:
                     continue
 
                 if rid not in _active_rentals:
-                    _active_rentals[rid] = {
+                    active_info = {
                         "executor_id": eid,
                         "executor_endpoint": r.get("executor_endpoint", spec.endpoint),
                         "container_name": r.get("container_name", ""),
@@ -2148,6 +2162,10 @@ async def orphan_sweeper(interval_s: float = 60.0) -> None:
                         "release_requested_at": _parse_iso_ts(r.get("release_requested_at")) if r.get("release_requested_at") else 0,
                         "last_release_error": r.get("last_release_error") or "",
                     }
+                    if _is_canary_rental(rid, r):
+                        active_info["kind"] = "canary"
+                        active_info["client_request_id"] = r.get("client_request_id", "")
+                    _active_rentals[rid] = active_info
                 try:
                     await _terminate_rental_internal(
                         rid,
@@ -2231,7 +2249,7 @@ def _active_non_canary_rentals() -> list[tuple[str, dict]]:
     return [
         (rid, info)
         for rid, info in list(_active_rentals.items())
-        if info.get("kind") != "canary" and not info.get("release_pending")
+        if not _is_canary_rental(rid, info) and not info.get("release_pending")
     ]
 
 
@@ -2280,6 +2298,8 @@ async def _terminate_policy_blacklisted_rentals(
 
 def _open_container_probation(rental_id: str, rental: dict, reason: str) -> None:
     if db is None:
+        return
+    if _is_canary_rental(rental_id, rental):
         return
     executor_id = rental.get("executor_id", "")
     if not executor_id:
