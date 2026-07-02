@@ -159,16 +159,16 @@ write_limit_profile() {
     local profile=${1:-endpoint}
     case "$profile" in
         endpoint)
-            printf '        limit_req zone=nodexo_endpoint_per_ip burst=120 nodelay;\n'
-            printf '        limit_conn nodexo_conn_per_ip 50;\n'
+            printf '        limit_req zone=nodexo_endpoint_per_ip burst=300 nodelay;\n'
+            printf '        limit_conn nodexo_conn_per_ip 100;\n'
             ;;
         receipt)
-            printf '        limit_req zone=nodexo_receipt_per_ip burst=120 nodelay;\n'
-            printf '        limit_conn nodexo_conn_per_ip 50;\n'
+            printf '        limit_req zone=nodexo_receipt_per_ip burst=1500 nodelay;\n'
+            printf '        limit_conn nodexo_conn_per_ip 200;\n'
             ;;
         chain_context)
-            printf '        limit_req zone=nodexo_context_per_ip burst=10 nodelay;\n'
-            printf '        limit_conn nodexo_conn_per_ip 20;\n'
+            printf '        limit_req zone=nodexo_context_per_ip burst=300 nodelay;\n'
+            printf '        limit_conn nodexo_conn_per_ip 100;\n'
             ;;
         none)
             ;;
@@ -210,9 +210,9 @@ cat <<'EOF' > "$limits_tmp"
 # Shared Nodexo public endpoint guardrails. These are intentionally generous for
 # protocol traffic; application-level signatures and replay checks remain the
 # authority for accepting requests.
-limit_req_zone $binary_remote_addr zone=nodexo_endpoint_per_ip:10m rate=30r/s;
-limit_req_zone $binary_remote_addr zone=nodexo_receipt_per_ip:10m rate=30r/s;
-limit_req_zone $binary_remote_addr zone=nodexo_context_per_ip:10m rate=2r/s;
+limit_req_zone $binary_remote_addr zone=nodexo_endpoint_per_ip:10m rate=100r/s;
+limit_req_zone $binary_remote_addr zone=nodexo_receipt_per_ip:10m rate=200r/s;
+limit_req_zone $binary_remote_addr zone=nodexo_context_per_ip:10m rate=100r/s;
 limit_conn_zone $binary_remote_addr zone=nodexo_conn_per_ip:10m;
 EOF
 

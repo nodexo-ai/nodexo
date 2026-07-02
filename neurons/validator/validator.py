@@ -1222,6 +1222,7 @@ async def lifespan(app: FastAPI):
     # cascading 429s under load and tying API responsiveness to chain health.
     chain_snapshot_task = None
     rental_event_index_task = None
+    rental_reconcile_task = None
     ttl_sweep_task = None
     orphan_sweep_task = None
     rental_watchdog_task = None
@@ -1361,15 +1362,15 @@ async def lifespan(app: FastAPI):
                 bt.logging.warning(f"ComputeRegistryEventIndexer failed to start: {e}")
 
         if rent.evm_write_enabled:
-            # Reconcile in-memory rental state with DB + chain after restart.
-            # Without this, an unterminated rental sticks the executor as
-            # is_rented=True forever until manually fixed (we hit this multiple
-            # times today). Reconciler runs once at boot; TTL sweeper handles
-            # the steady-state.
-            try:
-                await rent.reconcile_on_startup()
-            except Exception as e:
-                bt.logging.warning(f"Rental reconcile failed: {e}")
+            async def _run_rental_reconcile_on_startup() -> None:
+                try:
+                    await rent.reconcile_on_startup()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    bt.logging.warning(f"Rental reconcile failed: {e}")
+
+            rental_reconcile_task = asyncio.create_task(_run_rental_reconcile_on_startup())
             ttl_sweep_task = asyncio.create_task(rent.ttl_sweeper(interval_s=60))
             # Dropped from 300s → 60s so a stuck rented executor (orphan from a
             # partial-failure rent or a peer validator's stale lock) becomes
@@ -1565,6 +1566,8 @@ async def lifespan(app: FastAPI):
         chain_snapshot_task.cancel()
     if rental_event_index_task is not None:
         rental_event_index_task.cancel()
+    if rental_reconcile_task is not None:
+        rental_reconcile_task.cancel()
     if ttl_sweep_task is not None:
         ttl_sweep_task.cancel()
     if orphan_sweep_task is not None:

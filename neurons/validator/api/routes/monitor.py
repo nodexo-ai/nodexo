@@ -504,9 +504,9 @@ def _chain_context_rate_limit(request: Request) -> None:
     import time as _time
 
     try:
-        max_per_min = int(_os.environ.get("CHAIN_CONTEXT_RATE_LIMIT_PER_MIN", "240"))
+        max_per_min = int(_os.environ.get("CHAIN_CONTEXT_RATE_LIMIT_PER_MIN", "2400"))
     except Exception:
-        max_per_min = 240
+        max_per_min = 2400
     if max_per_min <= 0:
         return
     ip = (request.client.host if request.client else "") or "unknown"

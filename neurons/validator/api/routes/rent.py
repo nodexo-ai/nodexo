@@ -1330,7 +1330,10 @@ async def rent_executor(request: Request):
             except Exception:
                 pass
             try:
-                registry_client.mark_available(bytes.fromhex(selected.executor_id))
+                await asyncio.to_thread(
+                    registry_client.mark_available,
+                    bytes.fromhex(selected.executor_id),
+                )
             except Exception:
                 pass
             raise HTTPException(
@@ -1429,7 +1432,10 @@ async def rent_executor(request: Request):
         # chain state and mark the DB row as a failed orphan so a future
         # reconcile / history view explains what happened.
         try:
-            registry_client.mark_available(bytes.fromhex(selected.executor_id))
+            await asyncio.to_thread(
+                registry_client.mark_available,
+                bytes.fromhex(selected.executor_id),
+            )
         except Exception:
             bt.logging.error(f"Failed to rollback markRented for {selected.executor_id[:16]}")
         if db:
@@ -1721,7 +1727,10 @@ async def _terminate_rental_internal(rental_id: str, reason: str) -> dict:
         mark_error = ""
         if registry_client:
             try:
-                tx = registry_client.mark_available(bytes.fromhex(executor_id))
+                tx = await asyncio.to_thread(
+                    registry_client.mark_available,
+                    bytes.fromhex(executor_id),
+                )
                 end_block = _block_of_tx(tx)
             except Exception as e:
                 mark_ok = False
@@ -2058,7 +2067,10 @@ async def reconcile_on_startup() -> None:
         rid = r["rental_id"]
         eid = r["executor_id"]
         try:
-            spec = registry_client.get_executor_info(bytes.fromhex(eid))
+            spec = await asyncio.to_thread(
+                registry_client.get_executor_info,
+                bytes.fromhex(eid),
+            )
         except Exception:
             spec = None
         if spec and spec.is_rented:
@@ -2066,7 +2078,10 @@ async def reconcile_on_startup() -> None:
             # markRented); safe to release.
             released = False
             try:
-                registry_client.mark_available(bytes.fromhex(eid))
+                await asyncio.to_thread(
+                    registry_client.mark_available,
+                    bytes.fromhex(eid),
+                )
                 released = True
                 bt.logging.info(
                     f"reconcile: released stale-requested chain lock on {eid[:16]}"
