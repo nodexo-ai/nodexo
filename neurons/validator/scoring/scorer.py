@@ -300,6 +300,15 @@ def effective_min_stake_tao(ctx: ScoringContext, cfg: Optional[ScoringConfig] = 
     return max(float(cfg.min_miner_stake_tao or 0.0), proportional)
 
 
+def _proof_sample_count(ctx: ScoringContext) -> int:
+    return max(0, int(ctx.samples_1h or 0), int(ctx.samples_24h or 0))
+
+
+def _has_min_proof_samples(ctx: ScoringContext, cfg: ScoringConfig) -> bool:
+    required = int(cfg.min_reliability_samples or 0)
+    return required <= 0 or _proof_sample_count(ctx) >= required
+
+
 def stake_requirement_eligible(ctx: ScoringContext, cfg: Optional[ScoringConfig] = None) -> bool:
     """Return whether this executor should contribute to the owner stake floor."""
     cfg = cfg or ScoringConfig()
@@ -321,6 +330,8 @@ def stake_requirement_eligible(ctx: ScoringContext, cfg: Optional[ScoringConfig]
         - float(ctx.validator_outage_since_proof_s or 0.0),
     )
     if ctx.last_proof_valid_at <= 0 or age_proof > cfg.proof_recency_s:
+        return False
+    if not _has_min_proof_samples(ctx, cfg):
         return False
     if not ctx.rental_runtime_ok:
         return False
@@ -406,6 +417,13 @@ def score_one(ctx: ScoringContext, cfg: Optional[ScoringConfig] = None) -> Scori
         passed.append("proof_recent")
     else:
         failed.append(f"proof_recent (last={age_proof:.0f}s ago)")
+
+    # Gate B0.1 — enough full proof observations to trust the rolling pass rate.
+    proof_samples = _proof_sample_count(ctx)
+    if _has_min_proof_samples(ctx, cfg):
+        passed.append(f"proof_samples={proof_samples}")
+    else:
+        failed.append(f"proof_samples ({proof_samples} < {int(cfg.min_reliability_samples or 0)})")
 
     # Gate B1 — the host can actually run isolated rental containers.
     # A proof/calibration-only host may still produce valid proofs, but it must
