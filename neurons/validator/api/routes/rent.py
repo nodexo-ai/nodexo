@@ -855,6 +855,7 @@ def _rental_response_from_row(row: dict, active_info: dict | None = None) -> dic
             "ssh_host": row.get("ssh_host") or "",
             "ssh_port": int(row.get("ssh_port") or 0),
             "ssh_user": row.get("ssh_user") or "",
+            "tcp_ports": active_info.get("tcp_ports") or [],
         },
         "image": active_info.get("image", ""),
         "created_at": created_at,
@@ -1308,6 +1309,7 @@ async def rent_executor(request: Request):
                 min_value=60,
                 max_value=7200,
             ),
+            expose_tcp_ports=True,
         )
 
         # Reachability check: the miner reported `result.ssh_port`, but if
@@ -1358,6 +1360,7 @@ async def rent_executor(request: Request):
             "provision_image": provision_image,
             "container_image": result.image,
             "container_image_id": result.image_id,
+            "tcp_ports": result.tcp_ports or [],
             "created_at": time.time(),
             "ttl_seconds": ttl_seconds,
             "start_block": rental_block,
@@ -1417,6 +1420,7 @@ async def rent_executor(request: Request):
                 "ssh_host": result.ssh_host,
                 "ssh_port": result.ssh_port,
                 "ssh_user": result.ssh_user,
+                "tcp_ports": result.tcp_ports or [],
             },
             "image": image,
             "created_at": _active_rentals[rental_id]["created_at"],
@@ -1596,6 +1600,7 @@ async def list_rentals(request: Request):
                 "ssh_host": row.get("ssh_host", ""),
                 "ssh_port": row.get("ssh_port", 0),
                 "ssh_user": row.get("ssh_user", ""),
+                "tcp_ports": info.get("tcp_ports") or [],
             },
             "gpu": {
                 "model": row.get("gpu_model") or "?",

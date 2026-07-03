@@ -671,7 +671,7 @@ def _proof_only_calibration_mode() -> bool:
 
 
 def _preflight_rental_resources() -> None:
-    """Fail startup when the host cannot meet the minimum rental profile."""
+    """Check host storage before registration."""
     min_storage_gb = _min_rental_storage_gb()
     storage_gb = _docker_storage_capacity_gb()
     if storage_gb < min_storage_gb:
@@ -683,11 +683,11 @@ def _preflight_rental_resources() -> None:
         )
     available_gb = _docker_storage_available_gb()
     if available_gb < min_storage_gb:
-        raise RuntimeError(
+        bt.logging.warning(
             "Docker storage has less usable free space than the minimum rental "
             f"profile: {available_gb}GB free, require {min_storage_gb}GB. "
-            "Free Docker storage, prune old images, or lower "
-            "MINER_MIN_RENTAL_STORAGE_GB for dev-only runs."
+            "Existing containers may continue, but new rentals are rejected "
+            "until enough Docker storage is free."
         )
 
 
@@ -2617,6 +2617,7 @@ async def create_container(request: Request):
         storage_gb=resources["storage_gb"],
         ssh_pub_key=body.get("ssh_pub_key", ""),
         ports=body.get("ports"),
+        expose_tcp_ports=_request_bool(body, "expose_tcp_ports", False),
         use_sysbox=body.get("use_sysbox", True),
         ttl_seconds=body.get("ttl_seconds", 0),
     )
@@ -2680,6 +2681,7 @@ async def create_container(request: Request):
         info = docker_service.create_container(config)
         return {"container_id": info.container_id, "name": info.name,
                 "ssh_port": info.ssh_port, "ssh_user": info.ssh_user,
+                "tcp_ports": info.tcp_ports,
                 "status": info.status, "image": info.image, "image_id": info.image_id}
     except HTTPException:
         raise
@@ -2697,6 +2699,7 @@ async def destroy_container(name: str):
 async def list_containers():
     return [{"container_id": c.container_id, "name": c.name, "ssh_port": c.ssh_port,
              "ssh_user": c.ssh_user, "status": c.status,
+             "tcp_ports": c.tcp_ports,
              "created_at": c.created_at, "ttl_seconds": c.ttl_seconds,
              "image": c.image, "image_id": c.image_id}
             for c in docker_service.list_containers()]

@@ -32,7 +32,7 @@ the venv.
 - Synchronized system clock; signed validator traffic uses a short freshness
   window and setup verifies NTP before miner startup
 - Public miner API port open, default `8091`
-- Rental SSH port range open, default `20000-20100`
+- Rental TCP port range open, default `20000-20100`
 - Bittensor wallet/hotkey registered on the target subnet
 
 The setup script installs Docker, NVIDIA container toolkit, Sysbox, PM2,
@@ -265,14 +265,16 @@ Open these in the host firewall and provider firewall:
 
 ```text
 8091/tcp        miner API endpoint
-20000-20100/tcp rental SSH ports
+20000-20100/tcp rental ports
 ```
 
 When using nginx, the miner daemon listens on the loopback backend
 `127.0.0.1:18091`. Do not open `18091/tcp` to the Internet.
 
-The setup/miner startup preflights a sample of the rental port range before
-registration. If the sample is unreachable, strict mode refuses to register.
+Each rental uses one port for SSH and maps the remaining assigned TCP ports
+one-to-one into the container. The setup/miner startup preflights a sample of
+the rental port range before registration. If the sample is unreachable, strict
+mode refuses to register.
 
 ## Image Cache
 
@@ -399,6 +401,6 @@ standard TLS verification will reject it unless explicitly configured otherwise.
 
 For Cloudflare-protected domains, prefer `https://gpu.example.com` on port 443
 for the miner API and keep nginx bound to the loopback backend. Do not rely on
-standard Cloudflare HTTP proxy for rental SSH ports; the `20000-20100/tcp`
+standard Cloudflare HTTP proxy for rental TCP ports; the `20000-20100/tcp`
 range must remain directly reachable unless you deliberately add a TCP proxy
 product. See `docs/ENDPOINT_SECURITY.md`.

@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import bittensor as bt
@@ -32,6 +32,7 @@ class ContainerConfig:
     storage_gb: int = 100          # Disk limit
     ssh_pub_key: str = ""          # User's SSH public key
     ports: dict[int, int] = None   # host_port -> container_port mapping
+    expose_tcp_ports: bool = False # Map rental-range TCP ports into the container
     use_sysbox: bool = True        # Use Sysbox runtime
     ttl_seconds: int = 0           # Auto-terminate after N seconds (0 = no TTL)
 
@@ -49,6 +50,7 @@ class ContainerInfo:
     ttl_seconds: int
     image: str = ""
     image_id: str = ""
+    tcp_ports: list[int] = field(default_factory=list)
 
 
 CONTAINER_STATE_FILE = os.path.join(
@@ -75,28 +77,56 @@ class DockerService:
         self._port_range = port_range
         self._load_state()
 
+    def _used_host_ports(self) -> set[int]:
+        used: set[int] = set()
+        for c in self._containers.values():
+            if c.ssh_port:
+                used.add(c.ssh_port)
+            for p in c.tcp_ports or []:
+                if p:
+                    used.add(int(p))
+        return used
+
+    @staticmethod
+    def _host_port_available(port: int) -> bool:
+        import socket
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("0.0.0.0", port))
+            return True
+        except OSError:
+            return False
+
     def _allocate_port(self) -> int:
         """Pick a free port from the rental range. 0 = let Docker auto-assign."""
         if not self._port_range:
             return 0
         lo, hi = self._port_range
-        used = {c.ssh_port for c in self._containers.values() if c.ssh_port}
+        used = self._used_host_ports()
         for p in range(lo, hi + 1):
             if p in used:
                 continue
-            # Make sure no other process holds the port.
-            import socket
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    s.bind(("0.0.0.0", p))
+            if self._host_port_available(p):
                 return p
-            except OSError:
-                continue
         raise RuntimeError(
             f"No free port in rental range {lo}-{hi}. "
             f"Currently {len(used)} containers in use; widen --rental-port-range."
         )
+
+    def _service_port_bindings(self, ssh_host_port: int) -> dict[int, int]:
+        if not self._port_range:
+            return {}
+        lo, hi = self._port_range
+        used = self._used_host_ports()
+        reserved = {ssh_host_port}
+        bindings: dict[int, int] = {}
+        for port in range(lo, hi + 1):
+            if port in reserved or port in used:
+                continue
+            if self._host_port_available(port):
+                bindings[port] = port
+        return bindings
 
     _NAME_RE = None
     _GPU_UUID_RE = None
@@ -196,14 +226,23 @@ class DockerService:
         # --rental-port-range, which works for dev (ProxyJump through host)
         # but not for a real renter.
         ssh_host_port = 0
+        tcp_ports: list[int] = []
         if config.ports:
             for host_port, container_port in config.ports.items():
                 cmd.extend(["-p", f"{host_port}:{container_port}"])
                 if container_port == 22:
                     ssh_host_port = host_port
+                else:
+                    tcp_ports.append(int(host_port))
         else:
             ssh_host_port = self._allocate_port()
-            cmd.extend(["-p", f"{ssh_host_port}:22" if ssh_host_port else "0:22"])
+            port_bindings = {ssh_host_port: 22} if ssh_host_port else {0: 22}
+            if config.expose_tcp_ports and ssh_host_port:
+                port_bindings.update(self._service_port_bindings(ssh_host_port))
+            for host_port, container_port in sorted(port_bindings.items()):
+                cmd.extend(["-p", f"{host_port}:{container_port}"])
+                if container_port != 22:
+                    tcp_ports.append(int(host_port))
 
         # Restart policy
         cmd.extend(["--restart", "unless-stopped"])
@@ -266,6 +305,7 @@ class DockerService:
                 name=config.name,
                 image=config.image,
                 image_id=container_image_id,
+                tcp_ports=sorted(tcp_ports),
                 ssh_port=ssh_host_port,
                 ssh_user="root",
                 status="running",
@@ -275,7 +315,10 @@ class DockerService:
             )
             self._containers[config.name] = info
             self._save_state()
-            bt.logging.info(f"Container {config.name} created (port {ssh_host_port})")
+            bt.logging.info(
+                f"Container {config.name} created "
+                f"(ssh_port={ssh_host_port}, tcp_ports={len(tcp_ports)})"
+            )
             return info
 
         except subprocess.TimeoutExpired:
@@ -485,7 +528,7 @@ class DockerService:
         from the configured rental range, defaulting to 20000-20100 in
         miner.py.
         """
-        used_ports = sorted(c.ssh_port for c in self._containers.values() if c.ssh_port)
+        used_ports = sorted(self._used_host_ports())
         if not self._port_range:
             return {
                 "configured": False,
@@ -627,6 +670,7 @@ class DockerService:
                 "image": info.image,
                 "image_id": info.image_id,
                 "ssh_port": info.ssh_port,
+                "tcp_ports": info.tcp_ports,
                 "ssh_user": info.ssh_user,
                 "status": info.status,
                 "gpu_uuids": info.gpu_uuids,

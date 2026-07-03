@@ -34,7 +34,7 @@ def _version_str(major: int, minor: int, patch: int) -> str:
 
 MINER_MAJOR = 0
 MINER_MINOR = 1
-MINER_PATCH = 1
+MINER_PATCH = 3
 
 VALIDATOR_MAJOR = 0
 VALIDATOR_MINOR = 1

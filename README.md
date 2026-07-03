@@ -44,8 +44,8 @@ bash scripts/setup_validator.sh  # CPU-only validator host
 
 Both roles require a registered Bittensor hotkey for the target subnet.
 Validators should not use public Subtensor RPC for production operation. Miners
-also need the public API port and rental SSH port range reachable from
-validators.
+also need the public API port and rental TCP port range reachable from
+validators and renters.
 Validators do not require third-party API keys for normal proof verification
 and weight setting.
 

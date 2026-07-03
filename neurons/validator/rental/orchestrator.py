@@ -72,6 +72,7 @@ class RentalResult:
     executor_endpoint: str
     image: str = ""
     image_id: str = ""
+    tcp_ports: list[int] = None
 
 
 class RentalOrchestrator:
@@ -121,6 +122,7 @@ class RentalOrchestrator:
         require_image_cached: bool = True,
         pull_image: bool = False,
         image_pull_timeout_s: int = 1800,
+        expose_tcp_ports: bool = True,
     ) -> RentalResult:
         """Provision a rental container on the executor.
 
@@ -143,6 +145,7 @@ class RentalOrchestrator:
             "require_image_cached": require_image_cached,
             "pull_image": pull_image,
             "image_pull_timeout_s": image_pull_timeout_s,
+            "expose_tcp_ports": expose_tcp_ports,
         }
 
         # Serialize manually so we can sign the EXACT bytes the miner will
@@ -181,6 +184,14 @@ class RentalOrchestrator:
                 f"Miner returned non-integer ssh_port: {ssh_port_raw!r}"
             )
         ssh_user = data.get("ssh_user", "root")
+        tcp_ports = []
+        for port in data.get("tcp_ports") or []:
+            try:
+                p = int(port)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= p <= 65535 and p != ssh_port:
+                tcp_ports.append(p)
 
         # CRITICAL — argv-injection mitigation. If the miner returned
         # values that could land as ssh(1) options, fail the rental
@@ -198,6 +209,7 @@ class RentalOrchestrator:
             executor_endpoint=executor_endpoint,
             image=str(data.get("image") or ""),
             image_id=str(data.get("image_id") or ""),
+            tcp_ports=sorted(set(tcp_ports)),
         )
 
     async def add_ssh_key(

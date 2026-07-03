@@ -174,8 +174,8 @@ Certificate choices:
 Important limitation:
 
 - Standard Cloudflare HTTP proxy covers HTTP/HTTPS API traffic only.
-- It does not proxy the rental SSH range `20000-20100/tcp`.
-- Rental SSH ports must remain directly reachable, or use a deliberate TCP
+- It does not proxy the rental TCP range `20000-20100/tcp`.
+- Rental TCP ports must remain directly reachable, or use a deliberate TCP
   proxy product/design such as Cloudflare Spectrum.
 
 ## Validator Ingress Protection
