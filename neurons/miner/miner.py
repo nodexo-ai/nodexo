@@ -1296,17 +1296,24 @@ def _preflight_rental_port_range(
             time.sleep(0.5)
         if occupied_ports:
             bt.logging.info(
-                "Rental port preflight: port(s) already bound locally, "
-                f"checking external reachability anyway: {occupied_ports}"
+                "Rental port preflight: port(s) already bound locally; "
+                f"checking only bindable port(s): {bound_ports or 'none'}"
             )
 
-        results, services = _internet_port_results(host, ports, timeout_s)
+        if not bound_ports:
+            bt.logging.warning(
+                "Rental port preflight skipped external checks because all "
+                f"sampled port(s) are already bound locally: {occupied_ports}"
+            )
+            return
+
+        results, services = _internet_port_results(host, bound_ports, timeout_s)
     finally:
         for listener in listeners:
             listener.close()
 
-    unknown = [p for p in ports if p not in results]
-    closed = [p for p in ports if results.get(p) is False]
+    unknown = [p for p in bound_ports if p not in results]
+    closed = [p for p in bound_ports if results.get(p) is False]
     if closed:
         service_text = ", ".join(services) if services else "none"
         message = (
