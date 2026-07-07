@@ -242,6 +242,7 @@ class AutoUpdater:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._update_pending = False
+        self._restart_pending = False
 
     def start(self) -> None:
         if self._thread is not None:
@@ -262,11 +263,18 @@ class AutoUpdater:
         self._stop_event.set()
 
     def notify_not_busy(self) -> None:
-        if not self._update_pending:
+        if not self._update_pending and not self._restart_pending:
             return
-        bt.logging.info("Deferred auto-update applying now")
-        self._update_pending = False
-        self._apply_update()
+        if self._restart_pending:
+            bt.logging.info("Deferred auto-update restart applying now")
+            self._restart_pending = False
+            self._stagger_sleep()
+            restart_process()
+            return
+        if self._update_pending:
+            bt.logging.info("Deferred auto-update applying now")
+            self._update_pending = False
+            self._apply_update()
 
     def _run(self) -> None:
         self._wait(60)
@@ -294,6 +302,16 @@ class AutoUpdater:
             self._wait(delay)
 
     def _check_once(self) -> None:
+        if self._restart_pending:
+            if self.busy_check and self.busy_check():
+                bt.logging.info("Auto-update restart still deferred because process is busy")
+                return
+            bt.logging.info("Auto-update restart applying after deferred install")
+            self._restart_pending = False
+            self._stagger_sleep()
+            restart_process()
+            return
+
         result = check_remote_version(self.role)
         if result is None:
             return
@@ -316,7 +334,7 @@ class AutoUpdater:
         self._wait(self.restart_delay)
         if self.busy_check and self.busy_check():
             bt.logging.info("Auto-update became busy during restart delay; deferred")
-            self._update_pending = True
+            self._restart_pending = True
             return
         self._stagger_sleep()
         restart_process()
