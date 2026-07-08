@@ -682,8 +682,11 @@ async def list_instances(
     status: Optional[str] = Query(None, description="Filter by status (ok/stale/offline/fail)"),
     gpu: Optional[str] = Query(None, description="Filter by GPU model substring"),
     mig: Optional[bool] = Query(None, description="If true, only MIG-isolated executors"),
+    hotkey: Optional[str] = Query(None, description="Filter by miner hotkey"),
+    executor_id: Optional[str] = Query(None, description="Filter by executor ID"),
     include_inactive: bool = Query(False, description="Include DB-stale executors no longer active on chain"),
     include_unhealthy: bool = Query(False, description="Include executors with stale heartbeat or failed verifier status"),
+    include_hidden: bool = Query(False, description="Include operator diagnostic rows hidden from public inventory"),
     limit: int = Query(50, ge=1, le=200),
 ):
     """List all known instances with hardware specs + live metrics.
@@ -707,14 +710,23 @@ async def list_instances(
             hidden = set()
             probation = set()
 
+        hotkey_filter = (hotkey or "").strip()
+        executor_filter = (executor_id or "").strip()
+        operator_scoped = bool(hotkey_filter or executor_filter)
+        allow_hidden_diagnostics = include_hidden and operator_scoped
+
         active_ids: set[str] | None = None
         if chain_snapshot is not None and not include_inactive:
             active_ids = {ex.executor_id for ex in chain_snapshot.all_executors()}
 
         query = s.query(ExecutorStats)
+        if hotkey_filter:
+            query = query.filter(ExecutorStats.hotkey_ss58 == hotkey_filter)
+        if executor_filter:
+            query = query.filter(ExecutorStats.executor_id == executor_filter)
         if status:
             query = query.filter(ExecutorStats.current_status == status)
-        if hidden:
+        if hidden and not allow_hidden_diagnostics:
             query = query.filter(~ExecutorStats.executor_id.in_(hidden))
         if active_ids is not None:
             if not active_ids:
