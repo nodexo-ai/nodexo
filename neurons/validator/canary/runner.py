@@ -362,7 +362,9 @@ class CanaryRunner:
                 )
             else:
                 rental_block = rent_route._current_registry_block()
-            rent_route._record_allocation_lock(
+                if rental_block <= 0:
+                    raise RuntimeError("registry block unavailable")
+            await rent_route._record_allocation_lock(
                 rental_id=canary_rental_id,
                 executor_id=executor_id,
                 kind="canary",
@@ -447,7 +449,7 @@ class CanaryRunner:
                         "start_block": rental_block,
                         "chain_locked": chain_locked,
                     }
-                    rent_route._update_allocation_container(
+                    await rent_route._update_allocation_container(
                         canary_rental_id, container_name,
                     )
                 bt.logging.info(
@@ -741,7 +743,7 @@ class CanaryRunner:
                     rent_route.rental_state.record_available(
                         canary_rental_id, available_block,
                     )
-                    rent_route._release_allocation_lock(
+                    await rent_route._release_allocation_lock(
                         rental_id=canary_rental_id,
                         executor_id=executor_id,
                         end_block=available_block,

@@ -969,6 +969,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         bt.logging.warning(f"Orchestrator hotkey_seed load failed: {e}")
     rent.rental_orchestrator = RentalOrchestrator(hotkey_seed=_orch_seed)
+    rent.allocation_hotkey_seed = _orch_seed
 
     if getattr(app, '_vali_pre_rpc', None):
         rpc = app._vali_pre_rpc
@@ -1208,6 +1209,7 @@ async def lifespan(app: FastAPI):
         _metagraph_stats_loop(rpc, None, interval=180, wallet_ss58=_stats_wallet_ss58)
     )
     allocation_task = None
+    allocation_reader_task = None
     try:
         from common.allocation_client import refresh_loop as _allocation_refresh_loop
         allocation_task = asyncio.create_task(
@@ -1218,6 +1220,15 @@ async def lifespan(app: FastAPI):
         )
     except Exception as e:
         bt.logging.warning(f"allocation refresh failed to start: {e}")
+    try:
+        allocation_reader_task = asyncio.create_task(
+            _allocation_reader_cache_loop(
+                rpc,
+                interval=float(os.environ.get("NODEXO_ALLOCATION_READER_REFRESH_SECONDS", "180")),
+            )
+        )
+    except Exception as e:
+        bt.logging.warning(f"allocation reader cache failed to start: {e}")
     auto_updater = None
     if getattr(app.state, "auto_update_enabled", False):
         from neurons.auto_update import AutoUpdater
@@ -1583,6 +1594,8 @@ async def lifespan(app: FastAPI):
     mg_log_task.cancel()
     if allocation_task is not None:
         allocation_task.cancel()
+    if allocation_reader_task is not None:
+        allocation_reader_task.cancel()
     if chain_snapshot_task is not None:
         chain_snapshot_task.cancel()
     if rental_event_index_task is not None:
@@ -2712,20 +2725,27 @@ async def _verify_one_item(item: dict):
                         api_allocated = was_allocated_at(executor_id, mode_block)
                     except Exception:
                         api_allocated = None
+                    if rent_route.rental_state.has_history(executor_id):
+                        chain_allocated = rent_route.rental_state.was_rented_at(
+                            executor_id, mode_block
+                        )
+                        ctx.is_rented = bool(chain_allocated) or bool(api_allocated)
+                    else:
+                        chain_allocated = bool(spec.is_rented)
+                        ctx.is_rented = bool(api_allocated) or spec.is_rented
                     try:
                         from common.subnet_runtime_config import get_subnet_runtime_config
+                        read_mode = get_subnet_runtime_config().allocation.read_mode
                         allocation_context_unavailable = (
-                            get_subnet_runtime_config().allocation.read_mode != "chain"
-                            and api_allocated is None
+                            (read_mode == "api" and api_allocated is None)
+                            or (
+                                read_mode == "dual"
+                                and api_allocated is None
+                                and not bool(chain_allocated)
+                            )
                         )
                     except Exception:
-                        allocation_context_unavailable = api_allocated is None
-                    if rent_route.rental_state.has_history(executor_id):
-                        ctx.is_rented = rent_route.rental_state.was_rented_at(
-                            executor_id, mode_block
-                        ) or bool(api_allocated)
-                    else:
-                        ctx.is_rented = bool(api_allocated) or spec.is_rented
+                        allocation_context_unavailable = api_allocated is None and not bool(chain_allocated)
             except Exception:
                 pass
 
@@ -3625,6 +3645,36 @@ async def _metagraph_stats_loop(rpc, uid, interval: float = 60.0, wallet_ss58: s
             break
         except Exception as e:
             bt.logging.debug(f"Metagraph stats refresh failed: {e}")
+
+
+def _permitted_validator_hotkeys_from_metagraph(mg) -> set[str]:
+    hotkeys = list(getattr(mg, "hotkeys", []) or [])
+    permits = getattr(mg, "validator_permit", None)
+    if permits is None:
+        permits = getattr(mg, "validator_permits", [])
+    if hasattr(permits, "tolist"):
+        permits = permits.tolist()
+    permits = list(permits or [])
+    count = min(len(hotkeys), len(permits))
+    return {str(hotkeys[i]) for i in range(count) if bool(permits[i]) and hotkeys[i]}
+
+
+async def _allocation_reader_cache_loop(rpc, interval: float = 180.0) -> None:
+    if rpc is None:
+        return
+    interval = max(60.0, float(interval or 180.0))
+    while True:
+        try:
+            mg = await asyncio.to_thread(rpc.get_metagraph, False)
+            readers = _permitted_validator_hotkeys_from_metagraph(mg)
+            from neurons.validator.api.routes import allocation as allocation_route
+            allocation_route.set_permitted_reader_hotkeys(readers)
+            bt.logging.debug(f"Allocation reader cache refreshed: {len(readers)} validator hotkeys")
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            bt.logging.debug(f"Allocation reader cache refresh failed: {e}")
 
 
 async def _metagraph_hotkey_cache_warmup(rpc) -> None:

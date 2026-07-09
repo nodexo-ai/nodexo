@@ -24,9 +24,10 @@ import bittensor as bt
 
 from sqlalchemy import (
     Column, BigInteger, Integer, Float, String, Text, Boolean, DateTime,
-    Index, UniqueConstraint, create_engine, event,
+    Index, UniqueConstraint, create_engine, event, text,
 )
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 Base = declarative_base()
@@ -482,7 +483,27 @@ class AllocationLock(Base):
         Index("ix_allocation_exec_state", "executor_id", "state"),
         Index("ix_allocation_revision", "revision"),
         Index("ix_allocation_owner_state", "owner_validator_hotkey", "state"),
+        Index("ix_allocation_state_ended", "state", "ended_at"),
+        Index(
+            "uq_allocation_active_executor",
+            "executor_id",
+            unique=True,
+            postgresql_where=text(
+                "state IN ('active', 'release_pending') AND ended_at IS NULL"
+            ),
+            sqlite_where=text(
+                "state IN ('active', 'release_pending') AND ended_at IS NULL"
+            ),
+        ),
     )
+
+
+class AllocationRevision(Base):
+    """Monotonic cursor for allocation snapshots."""
+    __tablename__ = "allocation_revisions"
+
+    name = Column(String(32), primary_key=True)
+    value = Column(BigInteger, default=0)
 
 
 class CanaryRecord(Base):
@@ -836,6 +857,32 @@ class Database:
             # it, but if a transient driver error happened we'd see
             # this. Surface so the operator notices.
             bt.logging.warning("idempotency_keys table missing after create_all")
+
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_allocation_state_ended "
+                    "ON allocation_locks (state, ended_at)"
+                ))
+                conn.execute(text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_allocation_active_executor "
+                    "ON allocation_locks (executor_id) "
+                    "WHERE state IN ('active', 'release_pending') "
+                    "AND ended_at IS NULL"
+                ))
+                if dialect.startswith("postgres"):
+                    conn.execute(text(
+                        "INSERT INTO allocation_revisions (name, value) "
+                        "VALUES ('global', 0) "
+                        "ON CONFLICT (name) DO NOTHING"
+                    ))
+                elif dialect.startswith("sqlite"):
+                    conn.execute(text(
+                        "INSERT OR IGNORE INTO allocation_revisions (name, value) "
+                        "VALUES ('global', 0)"
+                    ))
+        except Exception as e:
+            bt.logging.warning(f"inline migration (allocation_locks indexes): {e}")
 
     @contextmanager
     def session(self):
@@ -1819,8 +1866,26 @@ def get_owned_rental_ids(db: Database) -> set[str]:
 _ACTIVE_ALLOCATION_STATES = ("active", "release_pending")
 
 
-def _allocation_revision() -> int:
+def _allocation_revision_floor() -> int:
     return int(datetime.utcnow().timestamp() * 1_000_000)
+
+
+def _next_allocation_revision(session) -> int:
+    floor = _allocation_revision_floor()
+    row = (
+        session.query(AllocationRevision)
+        .filter_by(name="global")
+        .with_for_update()
+        .first()
+    )
+    if row is None:
+        row = AllocationRevision(name="global", value=0)
+        session.add(row)
+        session.flush()
+    next_value = max(int(row.value or 0) + 1, floor)
+    row.value = next_value
+    session.flush()
+    return next_value
 
 
 def _allocation_as_dict(row: AllocationLock) -> dict:
@@ -1848,7 +1913,6 @@ def create_allocation_lock(
     if not lock_id or not executor_id:
         raise ValueError("lock_id and executor_id are required")
     now = datetime.utcnow()
-    revision = _allocation_revision()
     with db.session() as s:
         existing = s.query(AllocationLock).filter_by(lock_id=lock_id).first()
         if existing is not None:
@@ -1865,6 +1929,7 @@ def create_allocation_lock(
         ).first()
         if active is not None:
             raise ValueError("executor already allocated")
+        revision = _next_allocation_revision(s)
         row = AllocationLock(
             lock_id=lock_id[:64],
             executor_id=executor_id,
@@ -1881,7 +1946,10 @@ def create_allocation_lock(
             updated_at=now,
         )
         s.add(row)
-        s.flush()
+        try:
+            s.flush()
+        except IntegrityError as e:
+            raise ValueError("executor already allocated") from e
         return _allocation_as_dict(row)
 
 
@@ -1890,14 +1958,18 @@ def update_allocation_container(
     lock_id: str,
     *,
     container_name: str = "",
+    owner_validator_hotkey: str = "",
+    admin: bool = False,
 ) -> dict | None:
     with db.session() as s:
         row = s.query(AllocationLock).filter_by(lock_id=lock_id).first()
         if row is None:
             return None
+        if not admin and owner_validator_hotkey and row.owner_validator_hotkey != owner_validator_hotkey:
+            raise PermissionError("allocation lock owned by another validator")
         if container_name:
             row.container_name = container_name[:128]
-        row.revision = _allocation_revision()
+        row.revision = _next_allocation_revision(s)
         row.updated_at = datetime.utcnow()
         s.flush()
         return _allocation_as_dict(row)
@@ -1933,7 +2005,7 @@ def release_allocation_lock(
         if not admin and owner_validator_hotkey and row.owner_validator_hotkey != owner_validator_hotkey:
             raise PermissionError("allocation lock owned by another validator")
         now = datetime.utcnow()
-        row.revision = _allocation_revision()
+        row.revision = _next_allocation_revision(s)
         row.updated_at = now
         row.release_reason = (reason or "user")[:32]
         if pending:
@@ -2675,6 +2747,7 @@ def prune_validator_db(
     rental_window_retention_days: int | None = None,
     sybil_flag_retention_days: int | None = None,
     idempotency_retention_days: int | None = None,
+    allocation_lock_retention_days: int | None = None,
 ) -> dict[str, int]:
     """Back up and prune high-volume validator rows.
 
@@ -2692,6 +2765,7 @@ def prune_validator_db(
             "rental_window": 90,
             "sybil_flag": 90,
             "idempotency": 30,
+            "allocation_lock": 14,
         }
     else:
         defaults = {
@@ -2701,6 +2775,7 @@ def prune_validator_db(
             "rental_window": 30,
             "sybil_flag": 30,
             "idempotency": 7,
+            "allocation_lock": 3,
         }
 
     def _days(name: str, default: int, value: int | None) -> int:
@@ -2717,6 +2792,11 @@ def prune_validator_db(
     window_days = _days("VALIDATOR_RENTAL_WINDOW_RETENTION_DAYS", defaults["rental_window"], rental_window_retention_days)
     flag_days = _days("VALIDATOR_SYBIL_FLAG_RETENTION_DAYS", defaults["sybil_flag"], sybil_flag_retention_days)
     idem_days = _days("VALIDATOR_IDEMPOTENCY_RETENTION_DAYS", defaults["idempotency"], idempotency_retention_days)
+    allocation_days = _days(
+        "VALIDATOR_ALLOCATION_LOCK_RETENTION_DAYS",
+        defaults["allocation_lock"],
+        allocation_lock_retention_days,
+    )
 
     summary: dict[str, int] = {}
 
@@ -2782,6 +2862,19 @@ def prune_validator_db(
                 IdempotencyKey.created_at < cutoff,
             ),
             "idempotency_keys",
+            backup_dir,
+        )
+    if allocation_days > 0:
+        cutoff = datetime.utcnow() - timedelta(days=allocation_days)
+        summary["allocation_locks"] = _backup_and_prune_query(
+            db,
+            AllocationLock,
+            lambda s: s.query(AllocationLock).filter(
+                AllocationLock.state == "released",
+                AllocationLock.ended_at != None,  # noqa: E711
+                AllocationLock.ended_at < cutoff,
+            ),
+            "allocation_locks",
             backup_dir,
         )
 

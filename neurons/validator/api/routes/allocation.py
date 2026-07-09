@@ -20,6 +20,12 @@ router = APIRouter(tags=["allocation"])
 
 db_instance = None
 authority_hotkey_seed: bytes | None = None
+permitted_reader_hotkeys: set[str] = set()
+
+
+def set_permitted_reader_hotkeys(hotkeys: set[str]) -> None:
+    global permitted_reader_hotkeys
+    permitted_reader_hotkeys = {str(h).strip() for h in hotkeys if str(h).strip()}
 
 
 def _canonical_request_bytes(method: str, path: str, body: bytes) -> bytes:
@@ -40,7 +46,7 @@ def _runtime_allowed() -> tuple[set[str], set[str], set[str], str]:
         allocation = cfg.allocation
         writers = set(allocation.writer_hotkeys)
         admins = set(allocation.admin_hotkeys)
-        readers = set(cfg.network.rental_validator_hotkeys)
+        readers = set(cfg.network.rental_validator_hotkeys) | permitted_reader_hotkeys
         authority = allocation.authority_hotkey or (
             cfg.network.rental_validator_hotkeys[0]
             if cfg.network.rental_validator_hotkeys else ""
@@ -169,6 +175,10 @@ async def status(request: Request, since_block: int = 0, since_revision: int = 0
         _sanitize_lock(row)
         for row in locks
         if int(row.get("start_block") or 0) > 0
+        or (
+            int(since_revision or 0) > 0
+            and row.get("state") not in {"active", "release_pending"}
+        )
     ]
     return _payload_response({
         "revision": allocation_latest_revision(db_instance),
@@ -244,6 +254,34 @@ async def release(request: Request):
             owner_validator_hotkey=hotkey,
             admin=admin,
             pending=bool(body.get("pending")),
+        )
+    except PermissionError as e:
+        raise HTTPException(403, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if row is None:
+        raise HTTPException(404, "allocation lock not found")
+    return _payload_response({"lock": _sanitize_lock(row)})
+
+
+@router.post("/api/allocation/container")
+async def container(request: Request):
+    hotkey, admin = await _verify_signed_request(
+        request,
+        allow_writers=True,
+        allow_admins=True,
+    )
+    if db_instance is None:
+        raise HTTPException(503, "allocation db unavailable")
+    body = await request.json()
+    try:
+        from common.db import update_allocation_container
+        row = update_allocation_container(
+            db_instance,
+            str(body.get("lock_id") or body.get("rental_id") or ""),
+            container_name=str(body.get("container_name") or ""),
+            owner_validator_hotkey=hotkey,
+            admin=admin,
         )
     except PermissionError as e:
         raise HTTPException(403, str(e))

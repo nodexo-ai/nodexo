@@ -596,7 +596,7 @@ async def reconcile_canary_inflight_async(db, registry_client) -> int:
                         f"tx={tx[:16] if tx else 'n/a'}"
                     )
                 else:
-                    rent_route._release_allocation_lock(
+                    await rent_route._release_allocation_lock(
                         rental_id="",
                         executor_id=eid,
                         end_block=rent_route._current_registry_block(),

@@ -60,6 +60,7 @@ db = None  # common.db.Database instance
 chain_snapshot = None  # neurons.validator.state.chain_snapshot.ChainSnapshot
 evm_write_enabled = True
 validator_hotkey_ss58 = ""
+allocation_hotkey_seed: bytes | None = None
 
 # Block-anchored rental window index — see neurons/validator/rental/state.py.
 # Verify_recipe consults this to decide if a recipe's epoch block was inside a
@@ -804,7 +805,7 @@ def _allocation_read_mode() -> str:
         return "chain"
 
 
-def _record_allocation_lock(
+async def _record_allocation_lock(
     *,
     rental_id: str,
     executor_id: str,
@@ -813,6 +814,20 @@ def _record_allocation_lock(
     container_name: str = "",
     chain_locked: bool,
 ) -> None:
+    remote_recorded = False
+    if _allocation_write_mode() == "api":
+        from common.allocation_client import post_lock, post_release
+        await post_lock(
+            allocation_hotkey_seed,
+            lock_id=rental_id,
+            executor_id=executor_id,
+            kind=kind,
+            start_block=start_block,
+            container_name=container_name,
+            chain_locked=chain_locked,
+            idempotency_key=rental_id,
+        )
+        remote_recorded = True
     if db is None:
         return
     try:
@@ -829,22 +844,46 @@ def _record_allocation_lock(
             idempotency_key=rental_id,
         )
     except Exception as e:
-        if _allocation_write_mode() == "api":
+        if remote_recorded:
+            try:
+                await post_release(
+                    allocation_hotkey_seed,
+                    lock_id=rental_id,
+                    executor_id=executor_id,
+                    end_block=start_block,
+                    reason="orphan",
+                )
+            except Exception as release_error:
+                bt.logging.warning(
+                    f"allocation remote rollback failed for {executor_id[:16]}: {release_error}"
+                )
             raise
         bt.logging.warning(f"allocation lock record failed for {executor_id[:16]}: {e}")
 
 
-def _update_allocation_container(rental_id: str, container_name: str) -> None:
+async def _update_allocation_container(rental_id: str, container_name: str) -> None:
+    if _allocation_write_mode() == "api":
+        from common.allocation_client import post_container
+        await post_container(
+            allocation_hotkey_seed,
+            lock_id=rental_id,
+            container_name=container_name,
+        )
     if db is None:
         return
     try:
         from common.db import update_allocation_container
-        update_allocation_container(db, rental_id, container_name=container_name)
+        update_allocation_container(
+            db,
+            rental_id,
+            container_name=container_name,
+            owner_validator_hotkey=validator_hotkey_ss58,
+        )
     except Exception as e:
         bt.logging.debug(f"allocation container update failed for {rental_id[:8]}: {e}")
 
 
-def _release_allocation_lock(
+async def _release_allocation_lock(
     *,
     rental_id: str,
     executor_id: str,
@@ -852,6 +891,16 @@ def _release_allocation_lock(
     reason: str,
     pending: bool = False,
 ) -> None:
+    if _allocation_write_mode() == "api":
+        from common.allocation_client import post_release
+        await post_release(
+            allocation_hotkey_seed,
+            lock_id=rental_id,
+            executor_id=executor_id,
+            end_block=end_block,
+            reason=reason,
+            pending=pending,
+        )
     if db is None:
         return
     try:
@@ -1414,9 +1463,14 @@ async def rent_executor(request: Request):
         rental_block = _block_of_tx(tx_hash)
     else:
         rental_block = _current_registry_block()
+        if rental_block <= 0:
+            if db:
+                from common.db import terminate_rental
+                terminate_rental(db, rental_id, reason="orphan", end_block=0)
+            raise HTTPException(503, "Registry block unavailable")
 
     try:
-        _record_allocation_lock(
+        await _record_allocation_lock(
             rental_id=rental_id,
             executor_id=selected.executor_id,
             kind="rental",
@@ -1501,7 +1555,7 @@ async def rent_executor(request: Request):
                 except Exception:
                     pass
             try:
-                _release_allocation_lock(
+                await _release_allocation_lock(
                     rental_id=rental_id,
                     executor_id=selected.executor_id,
                     end_block=_current_registry_block(),
@@ -1538,7 +1592,7 @@ async def rent_executor(request: Request):
             "chain_locked": chain_locked,
         }
         _chain_failure_streaks.pop(rental_id, None)
-        _update_allocation_container(rental_id, result.container_name)
+        await _update_allocation_container(rental_id, result.container_name)
         rental_state.record_rented(selected.executor_id, rental_id, rental_block)
         if db:
             try:
@@ -1617,7 +1671,7 @@ async def rent_executor(request: Request):
             except Exception:
                 bt.logging.error(f"Failed to rollback markRented for {selected.executor_id[:16]}")
         try:
-            _release_allocation_lock(
+            await _release_allocation_lock(
                 rental_id=rental_id,
                 executor_id=selected.executor_id,
                 end_block=_current_registry_block(),
@@ -1953,7 +2007,7 @@ async def _terminate_rental_internal(rental_id: str, reason: str) -> dict:
                 )
             if chain_snapshot is not None:
                 chain_snapshot.invalidate_executor(executor_id)
-            _release_allocation_lock(
+            await _release_allocation_lock(
                 rental_id=rental_id,
                 executor_id=executor_id,
                 end_block=0,
@@ -1977,7 +2031,7 @@ async def _terminate_rental_internal(rental_id: str, reason: str) -> dict:
             end_block = _current_registry_block()
         if mark_ok:
             rental_state.record_available(rental_id, end_block)
-            _release_allocation_lock(
+            await _release_allocation_lock(
                 rental_id=rental_id,
                 executor_id=executor_id,
                 end_block=end_block,
@@ -2270,7 +2324,7 @@ async def reconcile_on_startup() -> None:
         else:
             # Case B.
             try:
-                _release_allocation_lock(
+                await _release_allocation_lock(
                     rental_id=rid,
                     executor_id=eid,
                     end_block=_current_registry_block(),
@@ -2315,7 +2369,7 @@ async def reconcile_on_startup() -> None:
             if not released:
                 continue
         try:
-            _release_allocation_lock(
+            await _release_allocation_lock(
                 rental_id=rid,
                 executor_id=eid,
                 end_block=_current_registry_block(),
@@ -2380,7 +2434,7 @@ async def orphan_sweeper(interval_s: float = 60.0) -> None:
                     terminate_rental(db, rid, reason=r.get("release_reason") or "orphan", end_block=0)
                     _active_rentals.pop(rid, None)
                     await _drop_rental_lock(rid)
-                    _release_allocation_lock(
+                    await _release_allocation_lock(
                         rental_id=rid,
                         executor_id=eid,
                         end_block=_current_registry_block(),
@@ -2478,7 +2532,7 @@ async def orphan_sweeper(interval_s: float = 60.0) -> None:
                     if not released:
                         continue
                 try:
-                    _release_allocation_lock(
+                    await _release_allocation_lock(
                         rental_id=rid,
                         executor_id=eid,
                         end_block=_current_registry_block(),

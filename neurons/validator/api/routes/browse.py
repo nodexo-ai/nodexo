@@ -725,7 +725,7 @@ async def list_instances(
 
         hotkey_filter = (hotkey or "").strip()
         executor_filter = (executor_id or "").strip()
-        operator_scoped = bool(hotkey_filter or executor_filter)
+        operator_scoped = bool(hotkey_filter)
         allow_hidden_diagnostics = include_hidden and operator_scoped
 
         active_ids: set[str] | None = None

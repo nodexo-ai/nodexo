@@ -135,6 +135,8 @@ bash scripts/setup_validator.sh --sqlite
 
 Set `VALIDATOR_RETENTION_PROFILE=extended` for validators that need longer local
 telemetry.
+Released allocation locks follow the same profile: 3 days in `minimal`, 14 days
+in `extended`.
 
 ## 4. Choose Validator Role
 

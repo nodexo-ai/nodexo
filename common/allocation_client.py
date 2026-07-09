@@ -34,6 +34,41 @@ class AllocationSnapshot:
         return age is not None and age <= max_age and not self.last_error
 
 
+def _merge_delta(base: AllocationSnapshot, delta: AllocationSnapshot) -> AllocationSnapshot:
+    merged = AllocationSnapshot(
+        active=dict(base.active),
+        windows={eid: list(items) for eid, items in base.windows.items()},
+        revision=max(int(base.revision or 0), int(delta.revision or 0)),
+        generated_at=delta.generated_at,
+        received_at=delta.received_at,
+    )
+    changed: list[dict] = []
+    for item in delta.windows.values():
+        changed.extend(item)
+    for item in delta.active.values():
+        changed.append(item)
+    for item in changed:
+        eid = str(item.get("executor_id") or "").lower().removeprefix("0x")
+        lock_id = str(item.get("lock_id") or "")
+        if not eid:
+            continue
+        if lock_id:
+            merged.windows[eid] = [
+                existing
+                for existing in merged.windows.get(eid, [])
+                if str(existing.get("lock_id") or "") != lock_id
+            ]
+        if int(item.get("start_block") or 0) > 0:
+            merged.windows.setdefault(eid, []).append(item)
+        if item.get("busy"):
+            merged.active[eid] = item
+        elif eid in merged.active and (
+            not lock_id or str(merged.active[eid].get("lock_id") or "") == lock_id
+        ):
+            merged.active.pop(eid, None)
+    return merged
+
+
 _SNAPSHOT = AllocationSnapshot()
 _LOCK = asyncio.Lock()
 
@@ -92,12 +127,19 @@ def _verify_response(data: dict, *, max_age_s: int) -> dict:
     return payload
 
 
-async def fetch_status(hotkey_seed: bytes | None, *, since_block: int = 0) -> AllocationSnapshot:
+async def fetch_status(
+    hotkey_seed: bytes | None,
+    *,
+    since_block: int = 0,
+    since_revision: int = 0,
+) -> AllocationSnapshot:
     cfg = get_subnet_runtime_config().allocation
     url = _base_url() + "/status"
     params = []
     if since_block > 0:
         params.append(("since_block", str(int(since_block))))
+    if since_revision > 0:
+        params.append(("since_revision", str(int(since_revision))))
     if params:
         query = "&".join(f"{k}={v}" for k, v in params)
         url = f"{url}?{query}"
@@ -127,11 +169,98 @@ async def fetch_status(hotkey_seed: bytes | None, *, since_block: int = 0) -> Al
     return snap
 
 
+async def post_lock(
+    hotkey_seed: bytes | None,
+    *,
+    lock_id: str,
+    executor_id: str,
+    kind: str,
+    start_block: int,
+    container_name: str = "",
+    chain_locked: bool = False,
+    idempotency_key: str = "",
+) -> dict:
+    return await _post_json(
+        "/lock",
+        hotkey_seed,
+        {
+            "lock_id": lock_id,
+            "executor_id": executor_id,
+            "kind": kind,
+            "start_block": int(start_block or 0),
+            "container_name": container_name,
+            "chain_locked": bool(chain_locked),
+            "idempotency_key": idempotency_key or lock_id,
+        },
+    )
+
+
+async def post_container(
+    hotkey_seed: bytes | None,
+    *,
+    lock_id: str,
+    container_name: str,
+) -> dict:
+    return await _post_json(
+        "/container",
+        hotkey_seed,
+        {
+            "lock_id": lock_id,
+            "container_name": container_name,
+        },
+    )
+
+
+async def post_release(
+    hotkey_seed: bytes | None,
+    *,
+    lock_id: str = "",
+    executor_id: str = "",
+    end_block: int = 0,
+    reason: str = "user",
+    pending: bool = False,
+) -> dict:
+    return await _post_json(
+        "/release",
+        hotkey_seed,
+        {
+            "lock_id": lock_id,
+            "executor_id": executor_id,
+            "end_block": int(end_block or 0),
+            "reason": reason,
+            "pending": bool(pending),
+        },
+    )
+
+
+async def _post_json(path: str, hotkey_seed: bytes | None, payload: dict) -> dict:
+    if not hotkey_seed:
+        raise RuntimeError("allocation write signing seed unavailable")
+    cfg = get_subnet_runtime_config().allocation
+    url = _base_url() + path
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    headers = _signed_headers("POST", url, body, hotkey_seed)
+    headers["content-type"] = "application/json"
+    timeout = aiohttp.ClientTimeout(total=8)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, data=body, headers=headers) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"allocation write HTTP {resp.status}: {(await resp.text())[:160]}")
+            return _verify_response(
+                await resp.json(content_type=None),
+                max_age_s=max(30, int(cfg.max_snapshot_age_seconds)),
+            )
+
+
 async def refresh_loop(hotkey_seed: bytes | None, *, interval_s: float = 30.0) -> None:
     global _SNAPSHOT
     while True:
         try:
-            snap = await fetch_status(hotkey_seed)
+            current = get_snapshot()
+            since_revision = int(current.revision or 0) if current.is_fresh() else 0
+            snap = await fetch_status(hotkey_seed, since_revision=since_revision)
+            if since_revision > 0:
+                snap = _merge_delta(current, snap)
             async with _LOCK:
                 _SNAPSHOT = snap
         except asyncio.CancelledError:
