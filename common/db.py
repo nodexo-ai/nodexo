@@ -2026,6 +2026,7 @@ def list_allocation_locks(
     since_block: int = 0,
     since_revision: int = 0,
     limit: int = 5000,
+    newest_first: bool = False,
 ) -> list[dict]:
     executor_id = str(executor_id or "").strip().lower().removeprefix("0x")
     with db.session() as s:
@@ -2045,7 +2046,8 @@ def list_allocation_locks(
             )
         if since_revision > 0:
             q = q.filter(AllocationLock.revision > int(since_revision))
-        rows = q.order_by(AllocationLock.revision.asc()).limit(max(1, min(int(limit), 10000))).all()
+        order = AllocationLock.revision.desc() if newest_first else AllocationLock.revision.asc()
+        rows = q.order_by(order).limit(max(1, min(int(limit), 10000))).all()
         return [_allocation_as_dict(row) for row in rows]
 
 

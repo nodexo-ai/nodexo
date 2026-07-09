@@ -103,7 +103,7 @@ class NetworkRuntimeConfig:
 @dataclass(frozen=True)
 class AllocationRuntimeConfig:
     status_url: str = "https://nodexo.ai/api/allocation"
-    read_mode: str = "dual"
+    read_mode: str = "chain"
     write_mode: str = "chain"
     max_snapshot_age_seconds: int = 90
     authority_hotkey: str = ""
@@ -461,7 +461,7 @@ def _parse_allocation(raw: Any) -> AllocationRuntimeConfig:
     status_url = str(raw.get("status_url") or "https://nodexo.ai/api/allocation").strip()
     if not status_url.startswith(("https://", "http://")):
         raise ValueError("allocation.status_url must be an absolute URL")
-    read_mode = str(raw.get("read_mode") or "dual").strip().lower()
+    read_mode = str(raw.get("read_mode") or "chain").strip().lower()
     if read_mode not in {"chain", "api", "dual"}:
         raise ValueError("allocation.read_mode must be chain, api, or dual")
     write_mode = str(raw.get("write_mode") or "chain").strip().lower()
@@ -639,6 +639,12 @@ def parse_runtime_config_from_config(
     blacklist = _parse_blacklist(config.get("blacklist"))
     if weights.burn_uid is not None and weights.burn_uid in blacklist.uids:
         raise ValueError("weights.burn_uid must not be listed in blacklist.uids")
+    if allocation.read_mode != "chain" and not (
+        allocation.authority_hotkey or network.rental_validator_hotkeys
+    ):
+        raise ValueError(
+            "allocation authority hotkey is required when allocation.read_mode uses api"
+        )
     return SubnetRuntimeConfig(
         source=str(source),
         version=version,

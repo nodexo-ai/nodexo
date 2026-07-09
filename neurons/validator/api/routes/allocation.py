@@ -140,6 +140,12 @@ def _payload_response(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _require_authority_signing_ready() -> None:
+    _readers, _writers, _admins, authority = _runtime_allowed()
+    if authority and authority_hotkey_seed is None:
+        raise HTTPException(503, "allocation authority signing unavailable")
+
+
 def _sanitize_lock(row: dict) -> dict:
     return {
         "executor_id": row.get("executor_id", ""),
@@ -161,19 +167,34 @@ async def health():
 @router.get("/api/allocation/status")
 async def status(request: Request, since_block: int = 0, since_revision: int = 0):
     await _verify_signed_request(request, allow_readers=True, allow_admins=True)
+    _require_authority_signing_ready()
     if db_instance is None:
         raise HTTPException(503, "allocation db unavailable")
     from common.db import allocation_latest_revision, list_allocation_locks
-    locks = list_allocation_locks(
+    latest_revision = allocation_latest_revision(db_instance)
+    limit = 10000
+    active_locks = list_allocation_locks(
+        db_instance,
+        active_only=True,
+        limit=limit,
+    )
+    window_locks = list_allocation_locks(
         db_instance,
         since_block=max(0, int(since_block or 0)),
         since_revision=max(0, int(since_revision or 0)),
-        limit=10000,
+        limit=limit,
+        newest_first=not int(since_block or 0) and not int(since_revision or 0),
     )
-    active = [row for row in locks if row.get("state") in {"active", "release_pending"}]
+    active = [row for row in active_locks if row.get("state") in {"active", "release_pending"}]
+    returned_window_max_revision = max(
+        [int(row.get("revision") or 0) for row in window_locks] or [0]
+    )
+    revision = latest_revision
+    if int(since_revision or 0) > 0 and len(window_locks) >= limit:
+        revision = min(latest_revision, returned_window_max_revision)
     windows = [
         _sanitize_lock(row)
-        for row in locks
+        for row in window_locks
         if int(row.get("start_block") or 0) > 0
         or (
             int(since_revision or 0) > 0
@@ -181,7 +202,7 @@ async def status(request: Request, since_block: int = 0, since_revision: int = 0
         )
     ]
     return _payload_response({
-        "revision": allocation_latest_revision(db_instance),
+        "revision": revision,
         "active": [_sanitize_lock(row) for row in active],
         "windows": windows,
     })
@@ -193,6 +214,7 @@ async def executor_status(executor_id: str, request: Request):
     if len(eid) != 64:
         raise HTTPException(400, "invalid executor_id")
     await _verify_signed_request(request, allow_admins=True, allow_executor_owner=eid)
+    _require_authority_signing_ready()
     if db_instance is None:
         raise HTTPException(503, "allocation db unavailable")
     from common.db import active_allocation_container_names, list_allocation_locks
@@ -212,6 +234,7 @@ async def lock(request: Request):
         allow_writers=True,
         allow_admins=True,
     )
+    _require_authority_signing_ready()
     if db_instance is None:
         raise HTTPException(503, "allocation db unavailable")
     body = await request.json()
@@ -240,6 +263,7 @@ async def release(request: Request):
         allow_writers=True,
         allow_admins=True,
     )
+    _require_authority_signing_ready()
     if db_instance is None:
         raise HTTPException(503, "allocation db unavailable")
     body = await request.json()
@@ -271,6 +295,7 @@ async def container(request: Request):
         allow_writers=True,
         allow_admins=True,
     )
+    _require_authority_signing_ready()
     if db_instance is None:
         raise HTTPException(503, "allocation db unavailable")
     body = await request.json()
@@ -297,6 +322,7 @@ async def recover(request: Request):
     hotkey, admin = await _verify_signed_request(request, allow_admins=True)
     if not admin:
         raise HTTPException(403, "admin auth required")
+    _require_authority_signing_ready()
     if db_instance is None:
         raise HTTPException(503, "allocation db unavailable")
     body = await request.json()
