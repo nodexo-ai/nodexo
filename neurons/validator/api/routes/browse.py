@@ -302,6 +302,11 @@ async def marketplace_tiers(request: Request):
         free = [e for e in free if e.executor_id not in active_eids]
     except Exception:
         pass
+    try:
+        from common.allocation_client import is_effectively_busy
+        free = [e for e in free if not is_effectively_busy(e.executor_id)]
+    except Exception:
+        free = []
 
     policy_blocked = _policy_blacklist_blocked_ids(free)
     if policy_blocked:
@@ -547,6 +552,14 @@ async def list_executors(
     if chain_snapshot is None:
         return {"executors": [], "total": 0}
     all_executors = chain_snapshot.available_executors() if available_only else chain_snapshot.all_executors()
+    if available_only:
+        try:
+            from common.allocation_client import is_effectively_busy
+            all_executors = [
+                e for e in all_executors if not is_effectively_busy(e.executor_id)
+            ]
+        except Exception:
+            all_executors = []
 
     # Fraud-hidden executors are removed from public browse/network views.
     # Rental-probation executors are only shown when the caller asks for all
@@ -824,9 +837,11 @@ async def list_instances(
             alloc_state = st.alloc_state
             try:
                 from neurons.validator.api.routes import rent as rent_route
+                from common.allocation_client import is_effectively_busy
                 if (
                     (chain_spec is not None and chain_spec.is_rented)
                     or rent_route.rental_state.has_active_rental(st.executor_id)
+                    or is_effectively_busy(st.executor_id)
                 ):
                     alloc_state = "rented"
                 elif chain_spec is not None:

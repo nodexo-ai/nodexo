@@ -101,6 +101,17 @@ class NetworkRuntimeConfig:
 
 
 @dataclass(frozen=True)
+class AllocationRuntimeConfig:
+    status_url: str = "https://nodexo.ai/api/allocation"
+    read_mode: str = "dual"
+    write_mode: str = "chain"
+    max_snapshot_age_seconds: int = 90
+    authority_hotkey: str = ""
+    writer_hotkeys: tuple[str, ...] = ()
+    admin_hotkeys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class BlacklistRuntimeConfig:
     executor_ids: tuple[str, ...] = ()
     miner_hotkeys: tuple[str, ...] = ()
@@ -119,6 +130,7 @@ class SubnetRuntimeConfig:
     canary: CanaryRuntimeConfig = field(default_factory=CanaryRuntimeConfig)
     weights: WeightsRuntimeConfig = field(default_factory=WeightsRuntimeConfig)
     network: NetworkRuntimeConfig = field(default_factory=NetworkRuntimeConfig)
+    allocation: AllocationRuntimeConfig = field(default_factory=AllocationRuntimeConfig)
     blacklist: BlacklistRuntimeConfig = field(default_factory=BlacklistRuntimeConfig)
 
 
@@ -419,6 +431,70 @@ def _parse_network(raw: Any) -> NetworkRuntimeConfig:
     return NetworkRuntimeConfig(rental_validator_hotkeys=tuple(hotkeys))
 
 
+def _hotkey_list(raw: Any, *, name: str, max_items: int = 64) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f"{name} must be a list")
+    if len(raw) > max_items:
+        raise ValueError(f"{name} has too many entries")
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in raw:
+        hotkey = str(value or "").strip()
+        if not hotkey:
+            continue
+        if len(hotkey) > 80:
+            raise ValueError(f"{name} contains invalid hotkey")
+        if hotkey in seen:
+            continue
+        seen.add(hotkey)
+        out.append(hotkey)
+    return tuple(out)
+
+
+def _parse_allocation(raw: Any) -> AllocationRuntimeConfig:
+    if raw is None:
+        return AllocationRuntimeConfig()
+    if not isinstance(raw, dict):
+        raise ValueError("allocation must be an object")
+    status_url = str(raw.get("status_url") or "https://nodexo.ai/api/allocation").strip()
+    if not status_url.startswith(("https://", "http://")):
+        raise ValueError("allocation.status_url must be an absolute URL")
+    read_mode = str(raw.get("read_mode") or "dual").strip().lower()
+    if read_mode not in {"chain", "api", "dual"}:
+        raise ValueError("allocation.read_mode must be chain, api, or dual")
+    write_mode = str(raw.get("write_mode") or "chain").strip().lower()
+    if write_mode not in {"chain", "api"}:
+        raise ValueError("allocation.write_mode must be chain or api")
+    authority_hotkey = str(raw.get("authority_hotkey") or "").strip()
+    if len(authority_hotkey) > 80:
+        raise ValueError("allocation.authority_hotkey contains invalid hotkey")
+    return AllocationRuntimeConfig(
+        status_url=status_url.rstrip("/"),
+        read_mode=read_mode,
+        write_mode=write_mode,
+        max_snapshot_age_seconds=_coerce_int(
+            raw.get("max_snapshot_age_seconds"),
+            name="allocation.max_snapshot_age_seconds",
+            default=90,
+            min_value=5,
+            max_value=3600,
+        ),
+        authority_hotkey=authority_hotkey,
+        writer_hotkeys=_hotkey_list(
+            raw.get("writer_hotkeys"),
+            name="allocation.writer_hotkeys",
+            max_items=64,
+        ),
+        admin_hotkeys=_hotkey_list(
+            raw.get("admin_hotkeys"),
+            name="allocation.admin_hotkeys",
+            max_items=64,
+        ),
+    )
+
+
 _EXECUTOR_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 _ADDRESS_RE = re.compile(r"^0x[0-9a-f]{40}$")
 
@@ -559,6 +635,7 @@ def parse_runtime_config_from_config(
     canary = _parse_canary(config.get("canary"))
     weights = _parse_weights(config.get("weights"))
     network = _parse_network(config.get("network"))
+    allocation = _parse_allocation(config.get("allocation"))
     blacklist = _parse_blacklist(config.get("blacklist"))
     if weights.burn_uid is not None and weights.burn_uid in blacklist.uids:
         raise ValueError("weights.burn_uid must not be listed in blacklist.uids")
@@ -570,6 +647,7 @@ def parse_runtime_config_from_config(
         canary=canary,
         weights=weights,
         network=network,
+        allocation=allocation,
         blacklist=blacklist,
     )
 

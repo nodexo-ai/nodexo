@@ -458,6 +458,33 @@ class RentalWindowRow(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class AllocationLock(Base):
+    """Authority-owned allocation lock and historical window."""
+    __tablename__ = "allocation_locks"
+
+    lock_id = Column(String(64), primary_key=True)
+    executor_id = Column(String(64), index=True)
+    kind = Column(String(16), default="rental")
+    state = Column(String(24), default="active", index=True)
+    owner_validator_hotkey = Column(String(80), default="", index=True)
+    container_name = Column(String(128), default="")
+    start_block = Column(BigInteger, default=0)
+    end_block = Column(BigInteger, default=0)
+    started_at = Column(DateTime, default=datetime.utcnow, index=True)
+    ended_at = Column(DateTime, nullable=True)
+    chain_locked = Column(Boolean, default=False)
+    revision = Column(BigInteger, default=0, index=True)
+    idempotency_key = Column(String(128), default="", index=True)
+    release_reason = Column(String(32), default="")
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_allocation_exec_state", "executor_id", "state"),
+        Index("ix_allocation_revision", "revision"),
+        Index("ix_allocation_owner_state", "owner_validator_hotkey", "state"),
+    )
+
+
 class CanaryRecord(Base):
     """One row per executor: last canary outcome + consecutive-error
     streak used to detect canary sabotage (a miner who reliably breaks
@@ -1787,6 +1814,188 @@ def get_owned_rental_ids(db: Database) -> set[str]:
     """
     with db.session() as s:
         return {row[0] for row in s.query(Rental.rental_id).all()}
+
+
+_ACTIVE_ALLOCATION_STATES = ("active", "release_pending")
+
+
+def _allocation_revision() -> int:
+    return int(datetime.utcnow().timestamp() * 1_000_000)
+
+
+def _allocation_as_dict(row: AllocationLock) -> dict:
+    d = {c.name: getattr(row, c.name) for c in row.__table__.columns}
+    for k, v in d.items():
+        if isinstance(v, datetime):
+            d[k] = v.isoformat() if v else None
+    return d
+
+
+def create_allocation_lock(
+    db: Database,
+    *,
+    lock_id: str,
+    executor_id: str,
+    owner_validator_hotkey: str,
+    kind: str = "rental",
+    start_block: int = 0,
+    container_name: str = "",
+    chain_locked: bool = False,
+    idempotency_key: str = "",
+) -> dict:
+    executor_id = str(executor_id or "").strip().lower().removeprefix("0x")
+    lock_id = str(lock_id or "").strip()
+    if not lock_id or not executor_id:
+        raise ValueError("lock_id and executor_id are required")
+    now = datetime.utcnow()
+    revision = _allocation_revision()
+    with db.session() as s:
+        existing = s.query(AllocationLock).filter_by(lock_id=lock_id).first()
+        if existing is not None:
+            if (
+                existing.executor_id != executor_id
+                or str(existing.kind or "") != (kind or "rental")[:16]
+            ):
+                raise ValueError("allocation lock id conflict")
+            return _allocation_as_dict(existing)
+        active = s.query(AllocationLock).filter(
+            AllocationLock.executor_id == executor_id,
+            AllocationLock.state.in_(_ACTIVE_ALLOCATION_STATES),
+            AllocationLock.ended_at == None,  # noqa: E711
+        ).first()
+        if active is not None:
+            raise ValueError("executor already allocated")
+        row = AllocationLock(
+            lock_id=lock_id[:64],
+            executor_id=executor_id,
+            kind=(kind or "rental")[:16],
+            state="active",
+            owner_validator_hotkey=(owner_validator_hotkey or "")[:80],
+            container_name=(container_name or "")[:128],
+            start_block=int(start_block or 0),
+            end_block=0,
+            started_at=now,
+            chain_locked=bool(chain_locked),
+            revision=revision,
+            idempotency_key=(idempotency_key or "")[:128],
+            updated_at=now,
+        )
+        s.add(row)
+        s.flush()
+        return _allocation_as_dict(row)
+
+
+def update_allocation_container(
+    db: Database,
+    lock_id: str,
+    *,
+    container_name: str = "",
+) -> dict | None:
+    with db.session() as s:
+        row = s.query(AllocationLock).filter_by(lock_id=lock_id).first()
+        if row is None:
+            return None
+        if container_name:
+            row.container_name = container_name[:128]
+        row.revision = _allocation_revision()
+        row.updated_at = datetime.utcnow()
+        s.flush()
+        return _allocation_as_dict(row)
+
+
+def release_allocation_lock(
+    db: Database,
+    *,
+    lock_id: str = "",
+    executor_id: str = "",
+    end_block: int = 0,
+    reason: str = "user",
+    owner_validator_hotkey: str = "",
+    admin: bool = False,
+    pending: bool = False,
+) -> dict | None:
+    executor_id = str(executor_id or "").strip().lower().removeprefix("0x")
+    with db.session() as s:
+        query = s.query(AllocationLock)
+        if lock_id:
+            query = query.filter(AllocationLock.lock_id == lock_id)
+        elif executor_id:
+            query = query.filter(
+                AllocationLock.executor_id == executor_id,
+                AllocationLock.state.in_(_ACTIVE_ALLOCATION_STATES),
+                AllocationLock.ended_at == None,  # noqa: E711
+            )
+        else:
+            raise ValueError("lock_id or executor_id is required")
+        row = query.first()
+        if row is None:
+            return None
+        if not admin and owner_validator_hotkey and row.owner_validator_hotkey != owner_validator_hotkey:
+            raise PermissionError("allocation lock owned by another validator")
+        now = datetime.utcnow()
+        row.revision = _allocation_revision()
+        row.updated_at = now
+        row.release_reason = (reason or "user")[:32]
+        if pending:
+            row.state = "release_pending"
+        else:
+            row.state = "released"
+            row.ended_at = now
+            row.end_block = int(end_block or 0)
+        s.flush()
+        return _allocation_as_dict(row)
+
+
+def list_allocation_locks(
+    db: Database,
+    *,
+    active_only: bool = False,
+    executor_id: str = "",
+    since_block: int = 0,
+    since_revision: int = 0,
+    limit: int = 5000,
+) -> list[dict]:
+    executor_id = str(executor_id or "").strip().lower().removeprefix("0x")
+    with db.session() as s:
+        q = s.query(AllocationLock)
+        if active_only:
+            q = q.filter(
+                AllocationLock.state.in_(_ACTIVE_ALLOCATION_STATES),
+                AllocationLock.ended_at == None,  # noqa: E711
+            )
+        if executor_id:
+            q = q.filter(AllocationLock.executor_id == executor_id)
+        if since_block > 0:
+            q = q.filter(
+                (AllocationLock.end_block == 0)
+                | (AllocationLock.end_block >= int(since_block))
+                | (AllocationLock.start_block >= int(since_block))
+            )
+        if since_revision > 0:
+            q = q.filter(AllocationLock.revision > int(since_revision))
+        rows = q.order_by(AllocationLock.revision.asc()).limit(max(1, min(int(limit), 10000))).all()
+        return [_allocation_as_dict(row) for row in rows]
+
+
+def allocation_latest_revision(db: Database) -> int:
+    with db.session() as s:
+        row = s.query(AllocationLock.revision).order_by(
+            AllocationLock.revision.desc()
+        ).first()
+        return int(row[0] or 0) if row else 0
+
+
+def active_allocation_container_names(db: Database, executor_id: str) -> list[str]:
+    executor_id = str(executor_id or "").strip().lower().removeprefix("0x")
+    if not executor_id:
+        return []
+    with db.session() as s:
+        rows = s.query(AllocationLock.container_name).filter(
+            AllocationLock.executor_id == executor_id,
+            AllocationLock.state.in_(_ACTIVE_ALLOCATION_STATES),
+            AllocationLock.ended_at == None,  # noqa: E711
+        ).all()
+        return [row[0] for row in rows if row[0]]
 
 
 def get_chain_cursor(db: Database, key: str) -> int:

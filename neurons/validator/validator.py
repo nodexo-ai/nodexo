@@ -810,7 +810,7 @@ async def lifespan(app: FastAPI):
     global analyzer, verify_pool, verification_queue
 
     from neurons.validator.proof.analyzer import ProofAnalyzer
-    from neurons.validator.api.routes import proofs, browse, rent
+    from neurons.validator.api.routes import proofs, browse, rent, allocation
 
     # ── Database ───────────────────────────────────────────────
     from common.db import Database, default_db_url
@@ -891,6 +891,7 @@ async def lifespan(app: FastAPI):
         browse.registry_client = registry
         browse.db_instance = db
         rent.registry_client = registry
+        allocation.db_instance = db
         proofs.registry_client = registry  # For registered-executor verification
         heartbeat.registry_client = registry
         heartbeat.db_instance = db
@@ -917,9 +918,10 @@ async def lifespan(app: FastAPI):
             bt.logging.warning(f"rental_state DB wire failed: {e}")
         bt.logging.info(f"Registry client initialized (chain_config={chain_config_path})")
     else:
-        from neurons.validator.api.routes import heartbeat, browse
+        from neurons.validator.api.routes import heartbeat, browse, allocation
         heartbeat.db_instance = db
         browse.db_instance = db  # /instances works without chain config
+        allocation.db_instance = db
         bt.logging.warning("No CHAIN_CONFIG set — on-chain browse/rent unavailable, local /instances works")
 
     # ── Subtensor RPC + wallet (pre-initialized in __main__ before uvicorn) ──
@@ -959,6 +961,11 @@ async def lifespan(app: FastAPI):
     try:
         from common.chain.wallet import load_hotkey_seed
         _orch_seed = load_hotkey_seed(wallet_name, hotkey_name)
+        try:
+            from neurons.validator.api.routes import allocation as allocation_route
+            allocation_route.authority_hotkey_seed = _orch_seed
+        except Exception as e:
+            bt.logging.warning(f"allocation authority signing setup failed: {e}")
     except Exception as e:
         bt.logging.warning(f"Orchestrator hotkey_seed load failed: {e}")
     rent.rental_orchestrator = RentalOrchestrator(hotkey_seed=_orch_seed)
@@ -1123,6 +1130,7 @@ async def lifespan(app: FastAPI):
     app.state.rpc = rpc
     app.state.wallet = wallet
     app.state.netuid = netuid
+    rent.validator_hotkey_ss58 = wallet.hotkey.ss58_address if wallet else ""
     proofs.rpc_client = rpc
     proofs.verification_priority_salt = getattr(wallet.hotkey, "ss58_address", "") or wallet_name
 
@@ -1199,6 +1207,17 @@ async def lifespan(app: FastAPI):
     mg_log_task = asyncio.create_task(
         _metagraph_stats_loop(rpc, None, interval=180, wallet_ss58=_stats_wallet_ss58)
     )
+    allocation_task = None
+    try:
+        from common.allocation_client import refresh_loop as _allocation_refresh_loop
+        allocation_task = asyncio.create_task(
+            _allocation_refresh_loop(
+                _orch_seed,
+                interval_s=float(os.environ.get("NODEXO_ALLOCATION_REFRESH_SECONDS", "30")),
+            )
+        )
+    except Exception as e:
+        bt.logging.warning(f"allocation refresh failed to start: {e}")
     auto_updater = None
     if getattr(app.state, "auto_update_enabled", False):
         from neurons.auto_update import AutoUpdater
@@ -1562,6 +1581,8 @@ async def lifespan(app: FastAPI):
     weight_task.cancel()
     metagraph_warmup_task.cancel()
     mg_log_task.cancel()
+    if allocation_task is not None:
+        allocation_task.cancel()
     if chain_snapshot_task is not None:
         chain_snapshot_task.cancel()
     if rental_event_index_task is not None:
@@ -1597,12 +1618,14 @@ from neurons.validator.api.routes.browse import router as browse_router
 from neurons.validator.api.routes.rent import router as rent_router
 from neurons.validator.api.routes.heartbeat import router as heartbeat_router
 from neurons.validator.api.routes.monitor import router as monitor_router
+from neurons.validator.api.routes.allocation import router as allocation_router
 
 app.include_router(proofs_router)
 app.include_router(browse_router)
 app.include_router(rent_router)
 app.include_router(heartbeat_router)
 app.include_router(monitor_router)
+app.include_router(allocation_router)
 
 
 @app.get("/health")
@@ -2651,6 +2674,7 @@ async def _verify_one_item(item: dict):
         # validator's own writes plus ComputeRegistry RentalStarted/RentalEnded
         # events, so peer-validator rentals are covered once the event indexer
         # has caught up.
+        allocation_context_unavailable = False
         if browse.registry_client:
             try:
                 # Use the proofs.py-side cache (60s TTL) so cycle-boundary
@@ -2681,13 +2705,27 @@ async def _verify_one_item(item: dict):
                     # seen this executor yet.
                     from neurons.validator.api.routes import rent as rent_route
                     cycle_block = epoch_id * ctx.epoch_interval
+                    mode_block = ctx.beacon_block or cycle_block
+                    api_allocated = None
+                    try:
+                        from common.allocation_client import was_allocated_at
+                        api_allocated = was_allocated_at(executor_id, mode_block)
+                    except Exception:
+                        api_allocated = None
+                    try:
+                        from common.subnet_runtime_config import get_subnet_runtime_config
+                        allocation_context_unavailable = (
+                            get_subnet_runtime_config().allocation.read_mode != "chain"
+                            and api_allocated is None
+                        )
+                    except Exception:
+                        allocation_context_unavailable = api_allocated is None
                     if rent_route.rental_state.has_history(executor_id):
-                        mode_block = ctx.beacon_block or cycle_block
                         ctx.is_rented = rent_route.rental_state.was_rented_at(
                             executor_id, mode_block
-                        )
+                        ) or bool(api_allocated)
                     else:
-                        ctx.is_rented = spec.is_rented
+                        ctx.is_rented = bool(api_allocated) or spec.is_rented
             except Exception:
                 pass
 
@@ -2703,6 +2741,18 @@ async def _verify_one_item(item: dict):
             )
             bt.logging.warning(
                 f"Skipping proof until validator registry context is available: "
+                f"executor={executor_id[:16]} cycle={epoch_id}"
+            )
+            return
+        if allocation_context_unavailable and _recipe_uses_micro_matrix(recipe_data):
+            from neurons.validator.api.routes import proofs as proofs_route
+            proofs_route._record_validator_capacity_skip(
+                recipe_data,
+                recv_time,
+                reason="allocation_context_unavailable",
+            )
+            bt.logging.warning(
+                f"Skipping micro proof until allocation context is available: "
                 f"executor={executor_id[:16]} cycle={epoch_id}"
             )
             return

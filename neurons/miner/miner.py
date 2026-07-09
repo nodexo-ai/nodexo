@@ -1991,7 +1991,12 @@ async def lifespan(app: FastAPI):
 
     async def _rental_state_cache_loop():
         if _compute_registry is None:
-            return
+            try:
+                from common.subnet_runtime_config import get_subnet_runtime_config
+                if get_subnet_runtime_config().allocation.read_mode == "chain":
+                    return
+            except Exception:
+                return
         try:
             interval_s = max(1.0, float(os.environ.get("NODEXO_RENTAL_STATE_REFRESH_SECONDS", "15")))
         except Exception:
@@ -1999,10 +2004,23 @@ async def lifespan(app: FastAPI):
         executor_id_bytes = bytes.fromhex(miner_id)
         while True:
             try:
-                rented_now = await asyncio.to_thread(
-                    _compute_registry.is_rented,
-                    executor_id_bytes,
-                )
+                rented_now = None
+                try:
+                    from common.subnet_runtime_config import get_subnet_runtime_config
+                    if get_subnet_runtime_config().allocation.read_mode != "chain":
+                        from common.allocation_client import fetch_executor_status
+                        status = await fetch_executor_status(miner_id, hotkey_seed)
+                        rented_now = bool((status or {}).get("busy"))
+                except Exception as e:
+                    bt.logging.debug(f"allocation rental state refresh failed: {e}")
+                if rented_now is None:
+                    if _compute_registry is None:
+                        await asyncio.sleep(interval_s)
+                        continue
+                    rented_now = await asyncio.to_thread(
+                        _compute_registry.is_rented,
+                        executor_id_bytes,
+                    )
                 rental_state_cache["is_rented"] = bool(rented_now)
                 rental_state_cache["updated_at"] = time.time()
             except Exception as e:
@@ -2214,9 +2232,16 @@ async def lifespan(app: FastAPI):
     proof_task = asyncio.create_task(_run_proof_after_startup_delay())
     ttl_task = asyncio.create_task(_ttl_checker())
     heartbeat_task = asyncio.create_task(_heartbeat_loop(_compute_registry, miner_id))
+    try:
+        from common.subnet_runtime_config import get_subnet_runtime_config
+        _allocation_state_enabled = (
+            get_subnet_runtime_config().allocation.read_mode != "chain"
+        )
+    except Exception:
+        _allocation_state_enabled = False
     rental_state_task: Optional[asyncio.Task] = (
         asyncio.create_task(_rental_state_cache_loop())
-        if _compute_registry is not None else None
+        if (_compute_registry is not None or _allocation_state_enabled) else None
     )
     vali_hb_task = asyncio.create_task(_validator_heartbeat_loop(interval=60))
     speedtest_task = asyncio.create_task(_network_speedtest_loop())

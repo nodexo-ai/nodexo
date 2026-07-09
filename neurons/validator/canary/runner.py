@@ -346,17 +346,31 @@ class CanaryRunner:
                     f"canary[{executor_id[:8]}]: requested row write failed: {e}"
                 )
 
-        # PHASE 1: markRented
+        # PHASE 1: allocation lock
         t_phase = time.perf_counter()
+        chain_locked = True
         try:
-            tx = await asyncio.to_thread(
-                self._registry.mark_rented, bytes.fromhex(executor_id),
-            )
-            bt.logging.info(
-                f"canary[{executor_id[:8]}]: markRented tx={tx[:16] if tx else 'n/a'}"
+            from neurons.validator.api.routes import rent as rent_route
+            chain_locked = rent_route._allocation_write_mode() == "chain"
+            if chain_locked:
+                tx = await asyncio.to_thread(
+                    self._registry.mark_rented, bytes.fromhex(executor_id),
+                )
+                rental_block = await asyncio.to_thread(rent_route._block_of_tx, tx)
+                bt.logging.info(
+                    f"canary[{executor_id[:8]}]: markRented tx={tx[:16] if tx else 'n/a'}"
+                )
+            else:
+                rental_block = rent_route._current_registry_block()
+            rent_route._record_allocation_lock(
+                rental_id=canary_rental_id,
+                executor_id=executor_id,
+                kind="canary",
+                start_block=rental_block,
+                chain_locked=chain_locked,
             )
         except Exception as e:
-            result["reason"] = f"markRented failed: {e}"
+            result["reason"] = f"allocation lock failed: {e}"
             if requested_row_persisted and "submitted" not in str(e).lower():
                 try:
                     from common.db import terminate_rental
@@ -367,7 +381,6 @@ class CanaryRunner:
             return result
         try:
             from neurons.validator.api.routes import rent as rent_route
-            rental_block = await asyncio.to_thread(rent_route._block_of_tx, tx)
             rent_route.rental_state.record_rented(
                 executor_id, canary_rental_id, rental_block,
             )
@@ -432,7 +445,11 @@ class CanaryRunner:
                         "created_at": time.time(),
                         "ttl_seconds": cfg.container_ttl_seconds,
                         "start_block": rental_block,
+                        "chain_locked": chain_locked,
                     }
+                    rent_route._update_allocation_container(
+                        canary_rental_id, container_name,
+                    )
                 bt.logging.info(
                     f"canary[{executor_id[:8]}]: provisioned {rental.container_name} "
                     f"image={image} runtime={provision_image} "
@@ -709,22 +726,31 @@ class CanaryRunner:
                         f"canary[{executor_id[:8]}]: container terminate failed: {e}"
                     )
             try:
-                tx = await asyncio.to_thread(
-                    self._registry.mark_available, bytes.fromhex(executor_id),
-                )
-                if canary_rental_id:
-                    from neurons.validator.api.routes import rent as rent_route
+                from neurons.validator.api.routes import rent as rent_route
+                if chain_locked:
+                    tx = await asyncio.to_thread(
+                        self._registry.mark_available, bytes.fromhex(executor_id),
+                    )
                     available_block = await asyncio.to_thread(rent_route._block_of_tx, tx)
+                    bt.logging.info(
+                        f"canary[{executor_id[:8]}]: markAvailable tx={tx[:16] if tx else 'n/a'}"
+                    )
+                else:
+                    available_block = rent_route._current_registry_block()
+                if canary_rental_id:
                     rent_route.rental_state.record_available(
                         canary_rental_id, available_block,
                     )
+                    rent_route._release_allocation_lock(
+                        rental_id=canary_rental_id,
+                        executor_id=executor_id,
+                        end_block=available_block,
+                        reason="canary",
+                    )
                 mark_available_ok = True
-                bt.logging.info(
-                    f"canary[{executor_id[:8]}]: markAvailable tx={tx[:16] if tx else 'n/a'}"
-                )
             except Exception as e:
                 bt.logging.warning(
-                    f"canary[{executor_id[:8]}]: markAvailable failed: {e}"
+                    f"canary[{executor_id[:8]}]: allocation release failed: {e}"
                 )
             if canary_rental_id:
                 try:

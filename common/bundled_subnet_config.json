@@ -26,6 +26,15 @@
       "5D7FVSM1fJM56zHJuMBuQ5LH32mkLni52JonoeppFrezvyHy"
     ]
   },
+  "allocation": {
+    "admin_hotkeys": [],
+    "authority_hotkey": "",
+    "max_snapshot_age_seconds": 90,
+    "read_mode": "dual",
+    "status_url": "https://nodexo.ai/api/allocation",
+    "write_mode": "chain",
+    "writer_hotkeys": []
+  },
   "pricing": {
     "default_price_per_hour": 0.1,
     "gpu_hourly_price": {

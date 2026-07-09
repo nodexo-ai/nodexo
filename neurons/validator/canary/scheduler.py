@@ -569,7 +569,7 @@ async def reconcile_canary_inflight_async(db, registry_client) -> int:
     them instead of silently clearing DB state while chain stays rented.
     """
     import asyncio
-    if db is None or registry_client is None:
+    if db is None:
         return 0
     try:
         from common.db import CanaryRecord
@@ -586,13 +586,22 @@ async def reconcile_canary_inflight_async(db, registry_client) -> int:
         reconciled = 0
         for eid in stale_eids:
             try:
-                tx = await asyncio.to_thread(
-                    registry_client.mark_available, bytes.fromhex(eid),
-                )
-                bt.logging.info(
-                    f"reconcile_canary_inflight: markAvailable({eid[:16]}) "
-                    f"tx={tx[:16] if tx else 'n/a'}"
-                )
+                from neurons.validator.api.routes import rent as rent_route
+                if rent_route._allocation_write_mode() == "chain" and registry_client is not None:
+                    tx = await asyncio.to_thread(
+                        registry_client.mark_available, bytes.fromhex(eid),
+                    )
+                    bt.logging.info(
+                        f"reconcile_canary_inflight: markAvailable({eid[:16]}) "
+                        f"tx={tx[:16] if tx else 'n/a'}"
+                    )
+                else:
+                    rent_route._release_allocation_lock(
+                        rental_id="",
+                        executor_id=eid,
+                        end_block=rent_route._current_registry_block(),
+                        reason="canary",
+                    )
                 reconciled += 1
             except ValueError as e:
                 # bytes.fromhex on bad data — skip, don't crash the

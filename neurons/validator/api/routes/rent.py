@@ -59,6 +59,7 @@ rental_orchestrator = None
 db = None  # common.db.Database instance
 chain_snapshot = None  # neurons.validator.state.chain_snapshot.ChainSnapshot
 evm_write_enabled = True
+validator_hotkey_ss58 = ""
 
 # Block-anchored rental window index — see neurons/validator/rental/state.py.
 # Verify_recipe consults this to decide if a recipe's epoch block was inside a
@@ -773,6 +774,131 @@ def _block_of_tx(tx_hash: str) -> int:
             return 0
 
 
+def _current_registry_block() -> int:
+    try:
+        if not registry_client:
+            return 0
+        block_number_fn = getattr(registry_client, "block_number", None)
+        return int(
+            block_number_fn()
+            if callable(block_number_fn)
+            else registry_client.w3.eth.block_number
+        )
+    except Exception:
+        return 0
+
+
+def _allocation_write_mode() -> str:
+    try:
+        from common.subnet_runtime_config import get_subnet_runtime_config
+        return get_subnet_runtime_config().allocation.write_mode
+    except Exception:
+        return "chain"
+
+
+def _allocation_read_mode() -> str:
+    try:
+        from common.subnet_runtime_config import get_subnet_runtime_config
+        return get_subnet_runtime_config().allocation.read_mode
+    except Exception:
+        return "chain"
+
+
+def _record_allocation_lock(
+    *,
+    rental_id: str,
+    executor_id: str,
+    kind: str,
+    start_block: int,
+    container_name: str = "",
+    chain_locked: bool,
+) -> None:
+    if db is None:
+        return
+    try:
+        from common.db import create_allocation_lock
+        create_allocation_lock(
+            db,
+            lock_id=rental_id,
+            executor_id=executor_id,
+            owner_validator_hotkey=validator_hotkey_ss58,
+            kind=kind,
+            start_block=start_block,
+            container_name=container_name,
+            chain_locked=chain_locked,
+            idempotency_key=rental_id,
+        )
+    except Exception as e:
+        if _allocation_write_mode() == "api":
+            raise
+        bt.logging.warning(f"allocation lock record failed for {executor_id[:16]}: {e}")
+
+
+def _update_allocation_container(rental_id: str, container_name: str) -> None:
+    if db is None:
+        return
+    try:
+        from common.db import update_allocation_container
+        update_allocation_container(db, rental_id, container_name=container_name)
+    except Exception as e:
+        bt.logging.debug(f"allocation container update failed for {rental_id[:8]}: {e}")
+
+
+def _release_allocation_lock(
+    *,
+    rental_id: str,
+    executor_id: str,
+    end_block: int,
+    reason: str,
+    pending: bool = False,
+) -> None:
+    if db is None:
+        return
+    try:
+        from common.db import release_allocation_lock
+        release_allocation_lock(
+            db,
+            lock_id=rental_id,
+            executor_id=executor_id,
+            end_block=end_block,
+            reason=reason,
+            owner_validator_hotkey=validator_hotkey_ss58,
+            pending=pending,
+        )
+    except Exception as e:
+        if _allocation_write_mode() == "api" and not pending:
+            raise
+        bt.logging.warning(f"allocation release failed for {rental_id[:8]}: {e}")
+
+
+def _allocation_lock_chain_locked(rental_id: str) -> bool:
+    if db is None:
+        return True
+    try:
+        from common.db import list_allocation_locks
+        rows = list_allocation_locks(db, active_only=False, limit=10000)
+        for row in rows:
+            if row.get("lock_id") == rental_id:
+                return bool(row.get("chain_locked"))
+    except Exception:
+        pass
+    return True
+
+
+def _allocation_lock_active(rental_id: str) -> bool:
+    if db is None:
+        return False
+    try:
+        from common.db import list_allocation_locks
+        rows = list_allocation_locks(db, active_only=True, limit=10000)
+        for row in rows:
+            if row.get("lock_id") == rental_id:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _parse_client_request_id(value: Any) -> str:
     if value is None:
         return ""
@@ -908,7 +1034,8 @@ async def rent_executor(request: Request):
     """
     if not await _is_admin_async(request):
         raise HTTPException(403, "internal validator auth required")
-    _require_evm_write_mode("renting")
+    if _allocation_write_mode() == "chain":
+        _require_evm_write_mode("renting")
 
     body = await request.json()
     gpu_model = body.get("gpu_model")         # e.g., "RTX4090" (substring match)
@@ -946,6 +1073,14 @@ async def rent_executor(request: Request):
     # got rented (our own markRented in flight, snapshot pre-refresh).
     active_eids = {info["executor_id"] for info in _active_rentals.values()}
     all_executors = [e for e in all_executors if e.executor_id not in active_eids]
+    if _allocation_read_mode() != "chain":
+        try:
+            from common.allocation_client import is_effectively_busy
+            all_executors = [
+                e for e in all_executors if not is_effectively_busy(e.executor_id)
+            ]
+        except Exception:
+            raise HTTPException(503, "Allocation state temporarily unavailable")
     policy_blocked = _policy_blacklist_blocked_ids(all_executors)
     if policy_blocked:
         all_executors = [e for e in all_executors if e.executor_id not in policy_blocked]
@@ -1258,23 +1393,49 @@ async def rent_executor(request: Request):
         ).hexdigest()[:32]
         bt.logging.warning("rent: no DB; rental_id collisions not detectable")
 
-    # ── On-chain lock (atomic via contract's !isRented check) ────
+    # Allocation lock.
+    # Chain mode writes the legacy ComputeRegistry flag and mirrors it into
+    # the allocation ledger. API mode writes only the allocation ledger.
+    write_mode = _allocation_write_mode()
+    chain_locked = write_mode == "chain"
+    if chain_locked:
+        try:
+            tx_hash = registry_client.mark_rented(bytes.fromhex(selected.executor_id))
+            bt.logging.info(f"markRented tx: {tx_hash}")
+        except Exception as e:
+            bt.logging.warning(
+                f"markRented failed for {selected.executor_id[:16]}: {e} "
+                "- retrying with different executor"
+            )
+            if db:
+                from common.db import terminate_rental
+                terminate_rental(db, rental_id, reason="orphan", end_block=0)
+            raise HTTPException(409, f"Executor became unavailable: {e}")
+        rental_block = _block_of_tx(tx_hash)
+    else:
+        rental_block = _current_registry_block()
+
     try:
-        tx_hash = registry_client.mark_rented(bytes.fromhex(selected.executor_id))
-        bt.logging.info(f"markRented tx: {tx_hash}")
+        _record_allocation_lock(
+            rental_id=rental_id,
+            executor_id=selected.executor_id,
+            kind="rental",
+            start_block=rental_block,
+            chain_locked=chain_locked,
+        )
     except Exception as e:
-        # Race condition: already rented by another validator
-        bt.logging.warning(f"markRented failed for {selected.executor_id[:16]}: {e} — retrying with different executor")
+        if chain_locked:
+            try:
+                await asyncio.to_thread(
+                    registry_client.mark_available,
+                    bytes.fromhex(selected.executor_id),
+                )
+            except Exception:
+                pass
         if db:
             from common.db import terminate_rental
             terminate_rental(db, rental_id, reason="orphan", end_block=0)
         raise HTTPException(409, f"Executor became unavailable: {e}")
-
-    # Record rental window start AFTER tx confirms — this fixes the race where
-    # the miner's in-flight HEAVY proof is for a block before our markRented.
-    # verify_recipe will use this block-anchored lookup instead of the live
-    # `is_rented` flag.
-    rental_block = _block_of_tx(tx_hash)
 
     # Eagerly refresh this executor in the snapshot so the next /marketplace
     # or /rent request sees the new is_rented=True without waiting for the
@@ -1331,10 +1492,20 @@ async def rent_executor(request: Request):
                 await rental_orchestrator.terminate(selected.endpoint, result.container_name)
             except Exception:
                 pass
+            if chain_locked:
+                try:
+                    await asyncio.to_thread(
+                        registry_client.mark_available,
+                        bytes.fromhex(selected.executor_id),
+                    )
+                except Exception:
+                    pass
             try:
-                await asyncio.to_thread(
-                    registry_client.mark_available,
-                    bytes.fromhex(selected.executor_id),
+                _release_allocation_lock(
+                    rental_id=rental_id,
+                    executor_id=selected.executor_id,
+                    end_block=_current_registry_block(),
+                    reason="orphan",
                 )
             except Exception:
                 pass
@@ -1364,8 +1535,10 @@ async def rent_executor(request: Request):
             "created_at": time.time(),
             "ttl_seconds": ttl_seconds,
             "start_block": rental_block,
+            "chain_locked": chain_locked,
         }
         _chain_failure_streaks.pop(rental_id, None)
+        _update_allocation_container(rental_id, result.container_name)
         rental_state.record_rented(selected.executor_id, rental_id, rental_block)
         if db:
             try:
@@ -1435,13 +1608,23 @@ async def rent_executor(request: Request):
         # Provision step or anything after markRented failed. Roll back
         # chain state and mark the DB row as a failed orphan so a future
         # reconcile / history view explains what happened.
+        if chain_locked:
+            try:
+                await asyncio.to_thread(
+                    registry_client.mark_available,
+                    bytes.fromhex(selected.executor_id),
+                )
+            except Exception:
+                bt.logging.error(f"Failed to rollback markRented for {selected.executor_id[:16]}")
         try:
-            await asyncio.to_thread(
-                registry_client.mark_available,
-                bytes.fromhex(selected.executor_id),
+            _release_allocation_lock(
+                rental_id=rental_id,
+                executor_id=selected.executor_id,
+                end_block=_current_registry_block(),
+                reason="orphan",
             )
         except Exception:
-            bt.logging.error(f"Failed to rollback markRented for {selected.executor_id[:16]}")
+            pass
         if db:
             try:
                 from common.db import terminate_rental
@@ -1685,7 +1868,6 @@ async def _terminate_rental_internal(rental_id: str, reason: str) -> dict:
     """
     if reason not in _VALID_REASONS:
         reason = "user"
-    _require_evm_write_mode("ending rentals")
     if rental_id not in _active_rentals:
         # Could be a duplicate call after another path already finished.
         # 404 instead of 500.
@@ -1701,6 +1883,13 @@ async def _terminate_rental_internal(rental_id: str, reason: str) -> dict:
         executor_id = rental["executor_id"]
         executor_endpoint = rental["executor_endpoint"]
         container_name = rental["container_name"]
+        chain_locked = bool(
+            rental.get("chain_locked")
+            if "chain_locked" in rental
+            else _allocation_lock_chain_locked(rental_id)
+        )
+        if chain_locked:
+            _require_evm_write_mode("ending rentals")
 
         # 1. Destroy the container on the executor (signed call to miner).
         #    Container destroy is BEST-EFFORT, not blocking. The miner's
@@ -1730,7 +1919,7 @@ async def _terminate_rental_internal(rental_id: str, reason: str) -> dict:
         end_block = 0
         mark_ok = True
         mark_error = ""
-        if registry_client:
+        if registry_client and chain_locked:
             try:
                 tx = await asyncio.to_thread(
                     registry_client.mark_available,
@@ -1745,7 +1934,7 @@ async def _terminate_rental_internal(rental_id: str, reason: str) -> dict:
                     f"{executor_id[:16]}: {e}"
                 )
 
-        if registry_client and not mark_ok:
+        if chain_locked and registry_client and not mark_ok:
             release_reason = reason or "user"
             effective_ttl = _release_effective_ttl_seconds(rental)
             rental["release_pending"] = True
@@ -1764,6 +1953,13 @@ async def _terminate_rental_internal(rental_id: str, reason: str) -> dict:
                 )
             if chain_snapshot is not None:
                 chain_snapshot.invalidate_executor(executor_id)
+            _release_allocation_lock(
+                rental_id=rental_id,
+                executor_id=executor_id,
+                end_block=0,
+                reason=release_reason,
+                pending=True,
+            )
             return {
                 "status": "release_pending",
                 "rental_id": rental_id,
@@ -1777,8 +1973,16 @@ async def _terminate_rental_internal(rental_id: str, reason: str) -> dict:
         #    rental_state lies and was_rented_at() answers wrong for the
         #    in-between blocks. Future proof comes back as "this executor
         #    was not rented" → counted toward stats incorrectly.
+        if not chain_locked and end_block <= 0:
+            end_block = _current_registry_block()
         if mark_ok:
             rental_state.record_available(rental_id, end_block)
+            _release_allocation_lock(
+                rental_id=rental_id,
+                executor_id=executor_id,
+                end_block=end_block,
+                reason=reason,
+            )
         if chain_snapshot is not None:
             chain_snapshot.invalidate_executor(executor_id)
 
@@ -1795,7 +1999,7 @@ async def _terminate_rental_internal(rental_id: str, reason: str) -> dict:
 
     # chain_released is honest only when registry_client was wired;
     # otherwise we never tried to mark it (was lying as True before).
-    chain_released = bool(registry_client) and mark_ok
+    chain_released = (not chain_locked) or (bool(registry_client) and mark_ok)
     return {
         "status": f"terminated_{reason}",
         "rental_id": rental_id,
@@ -1985,7 +2189,7 @@ async def reconcile_on_startup() -> None:
     rented-on-chain executor MUST have a DB row here; if it doesn't, we
     leave it alone and let the rightful owner handle it.
     """
-    if not db or not registry_client:
+    if not db:
         return
 
     from common.db import (
@@ -1997,15 +2201,20 @@ async def reconcile_on_startup() -> None:
     for r in active_in_db:
         rid = r["rental_id"]
         eid = r["executor_id"]
-        try:
-            spec = registry_client.get_executor_info(bytes.fromhex(eid))
-        except Exception as e:
-            bt.logging.warning(f"reconcile: get_executor_info({eid[:16]}) failed: {e}")
-            continue
-        if spec is None:
+        chain_locked = _allocation_lock_chain_locked(rid)
+        spec = None
+        if registry_client is not None:
+            try:
+                spec = registry_client.get_executor_info(bytes.fromhex(eid))
+            except Exception as e:
+                bt.logging.warning(f"reconcile: get_executor_info({eid[:16]}) failed: {e}")
+                if chain_locked:
+                    continue
+        if chain_locked and spec is None:
             terminate_rental(db, rid, reason="orphan", end_block=0)
             continue
-        if spec.is_rented:
+        api_locked = _allocation_lock_active(rid)
+        if (chain_locked and spec is not None and spec.is_rented) or (not chain_locked and api_locked):
             # Case A: rehydrate.
             ttl_seconds = int(r.get("ttl_seconds") or 0)
             if ttl_seconds <= 0:
@@ -2026,7 +2235,7 @@ async def reconcile_on_startup() -> None:
                     )
             active_info = {
                 "executor_id": eid,
-                "executor_endpoint": r.get("executor_endpoint", spec.endpoint),
+                "executor_endpoint": r.get("executor_endpoint") or (spec.endpoint if spec else ""),
                 "container_name": r.get("container_name", ""),
                 "ssh_host": r.get("ssh_host", ""),
                 "ssh_port": int(r.get("ssh_port") or 0),
@@ -2038,6 +2247,7 @@ async def reconcile_on_startup() -> None:
                 "release_reason": r.get("release_reason") or "",
                 "release_requested_at": _parse_iso_ts(r.get("release_requested_at")) if r.get("release_requested_at") else 0,
                 "last_release_error": r.get("last_release_error") or "",
+                "chain_locked": chain_locked,
             }
             if _is_canary_rental(rid, r):
                 active_info["kind"] = "canary"
@@ -2059,6 +2269,15 @@ async def reconcile_on_startup() -> None:
                     )
         else:
             # Case B.
+            try:
+                _release_allocation_lock(
+                    rental_id=rid,
+                    executor_id=eid,
+                    end_block=_current_registry_block(),
+                    reason="orphan",
+                )
+            except Exception:
+                pass
             terminate_rental(db, rid, reason="orphan", end_block=0)
             bt.logging.warning(f"reconcile: marked DB rental {rid[:8]}… orphan (chain says free)")
 
@@ -2095,6 +2314,15 @@ async def reconcile_on_startup() -> None:
                 bt.logging.warning(f"reconcile: stale-requested release failed: {e}")
             if not released:
                 continue
+        try:
+            _release_allocation_lock(
+                rental_id=rid,
+                executor_id=eid,
+                end_block=_current_registry_block(),
+                reason="orphan",
+            )
+        except Exception:
+            pass
         terminate_rental(db, rid, reason="orphan", end_block=0)
 
 
@@ -2135,7 +2363,7 @@ async def orphan_sweeper(interval_s: float = 60.0) -> None:
     while True:
         try:
             await asyncio.sleep(interval_s)
-            if not registry_client or not db:
+            if not db:
                 continue
             from common.db import (
                 get_active_rentals, get_release_pending_rentals,
@@ -2147,6 +2375,20 @@ async def orphan_sweeper(interval_s: float = 60.0) -> None:
             # until markAvailable succeeds or the chain already reports free.
             for r in get_release_pending_rentals(db):
                 rid, eid = r["rental_id"], r["executor_id"]
+                chain_locked = _allocation_lock_chain_locked(rid)
+                if not chain_locked:
+                    terminate_rental(db, rid, reason=r.get("release_reason") or "orphan", end_block=0)
+                    _active_rentals.pop(rid, None)
+                    await _drop_rental_lock(rid)
+                    _release_allocation_lock(
+                        rental_id=rid,
+                        executor_id=eid,
+                        end_block=_current_registry_block(),
+                        reason=r.get("release_reason") or "orphan",
+                    )
+                    continue
+                if registry_client is None:
+                    continue
                 try:
                     spec = await asyncio.to_thread(
                         registry_client.get_executor_info, bytes.fromhex(eid),
@@ -2181,6 +2423,7 @@ async def orphan_sweeper(interval_s: float = 60.0) -> None:
                         "release_reason": r.get("release_reason") or "",
                         "release_requested_at": _parse_iso_ts(r.get("release_requested_at")) if r.get("release_requested_at") else 0,
                         "last_release_error": r.get("last_release_error") or "",
+                        "chain_locked": _allocation_lock_chain_locked(rid),
                     }
                     if _is_canary_rental(rid, r):
                         active_info["kind"] = "canary"
@@ -2205,14 +2448,17 @@ async def orphan_sweeper(interval_s: float = 60.0) -> None:
             # 2) Stale 'requested' rows.
             for r in get_requested_rentals_older_than(db, REQUESTED_STALE_AFTER_S):
                 rid, eid = r["rental_id"], r["executor_id"]
-                try:
-                    spec = await asyncio.to_thread(
-                        registry_client.get_executor_info, bytes.fromhex(eid),
-                    )
-                except Exception as e:
-                    bt.logging.debug(f"orphan_sweeper get_executor_info failed: {e}")
-                    spec = None
-                if spec and spec.is_rented:
+                chain_locked = _allocation_lock_chain_locked(rid)
+                spec = None
+                if chain_locked and registry_client is not None:
+                    try:
+                        spec = await asyncio.to_thread(
+                            registry_client.get_executor_info, bytes.fromhex(eid),
+                        )
+                    except Exception as e:
+                        bt.logging.debug(f"orphan_sweeper get_executor_info failed: {e}")
+                        spec = None
+                if chain_locked and spec and spec.is_rented:
                     released = False
                     try:
                         await asyncio.to_thread(
@@ -2231,6 +2477,15 @@ async def orphan_sweeper(interval_s: float = 60.0) -> None:
                         )
                     if not released:
                         continue
+                try:
+                    _release_allocation_lock(
+                        rental_id=rid,
+                        executor_id=eid,
+                        end_block=_current_registry_block(),
+                        reason="orphan",
+                    )
+                except Exception:
+                    pass
                 terminate_rental(db, rid, reason="orphan", end_block=0)
 
             # 3) Active rows whose chain is_rented disagrees (rare).
@@ -2240,13 +2495,18 @@ async def orphan_sweeper(interval_s: float = 60.0) -> None:
                     # In-memory says we still own it; trust in-memory and let
                     # the renter's TTL or explicit terminate handle it.
                     continue
+                chain_locked = _allocation_lock_chain_locked(rid)
+                if not chain_locked:
+                    continue
+                if registry_client is None:
+                    continue
                 try:
                     spec = await asyncio.to_thread(
                         registry_client.get_executor_info, bytes.fromhex(eid),
                     )
                 except Exception:
                     spec = None
-                if spec and not spec.is_rented:
+                if chain_locked and spec and not spec.is_rented and not _allocation_lock_active(rid):
                     terminate_rental(db, rid, reason="orphan", end_block=0)
                     bt.logging.warning(
                         f"orphan_sweeper: rental {rid[:8]}… marked orphan "
@@ -2477,7 +2737,11 @@ async def rental_container_watchdog_once() -> dict:
 
             executor_id = info.get("executor_id", "")
             chain_kind = ""
-            if executor_id and _rental_age_seconds(info) >= _rental_chain_grace_seconds():
+            if (
+                info.get("chain_locked", True)
+                and executor_id
+                and _rental_age_seconds(info) >= _rental_chain_grace_seconds()
+            ):
                 chain_kind = _chain_failure_kind(executor_id)
             if _update_chain_failure_streak(rid, chain_kind, chain_threshold):
                 direct_kind = await asyncio.to_thread(

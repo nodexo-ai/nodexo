@@ -780,6 +780,30 @@ class DockerService:
 
         known: set[str] = set()
         any_validator_responded = False
+        try:
+            from common.subnet_runtime_config import get_subnet_runtime_config
+            allocation_cfg = get_subnet_runtime_config().allocation
+        except Exception:
+            allocation_cfg = None
+        if allocation_cfg is not None and allocation_cfg.read_mode != "chain":
+            try:
+                from common.allocation_client import fetch_executor_status_sync
+                status = fetch_executor_status_sync(
+                    executor_id,
+                    hotkey_seed,
+                    timeout_s=5,
+                )
+                for name in (status or {}).get("container_names") or []:
+                    if name:
+                        known.add(name)
+                any_validator_responded = True
+            except Exception as e:
+                bt.logging.warning(
+                    f"reap_orphans: allocation authority unavailable ({e}); "
+                    "refusing to destroy local containers"
+                )
+                return 0
+            validator_urls = []
         # Sign the request — the endpoint is no longer public (audit
         # C-9). Signature is over the canonical "GET <path>" string;
         # the validator's binding check confirms the hotkey actually
