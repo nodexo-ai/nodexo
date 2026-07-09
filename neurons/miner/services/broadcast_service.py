@@ -701,8 +701,7 @@ class BroadcastService:
                 fresh = self._clean_validator_list(fresh)
                 if fresh:
                     if (
-                        registry_failed
-                        and self._validator_cache
+                        self._validator_cache
                         and _has_evm_or_configured_validator(self._validator_cache)
                         and not _has_evm_or_configured_validator(fresh)
                     ):
@@ -804,8 +803,7 @@ class BroadcastService:
                 fresh = self._clean_validator_list(fresh)
                 if fresh:
                     if (
-                        registry_failed
-                        and self._validator_cache
+                        self._validator_cache
                         and _has_evm_or_configured_validator(self._validator_cache)
                         and not _has_evm_or_configured_validator(fresh)
                     ):
