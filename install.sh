@@ -137,7 +137,12 @@ update_existing_checkout() {
     if [[ -n "$(git -C "$REPO_DIR" status --porcelain --untracked-files=no)" ]]; then
         warn "Discarding local tracked changes in $REPO_DIR to match requested release ref."
     fi
-    git -C "$REPO_DIR" checkout -B nodexo-install FETCH_HEAD
+    if git -C "$REPO_DIR" rev-parse --verify --quiet "origin/$REPO_REF" >/dev/null; then
+        git -C "$REPO_DIR" checkout -B "$REPO_REF" FETCH_HEAD
+        git -C "$REPO_DIR" branch --set-upstream-to="origin/$REPO_REF" "$REPO_REF" >/dev/null 2>&1 || true
+    else
+        git -C "$REPO_DIR" checkout -B nodexo-install FETCH_HEAD
+    fi
     git -C "$REPO_DIR" reset --hard FETCH_HEAD >/dev/null
 }
 
