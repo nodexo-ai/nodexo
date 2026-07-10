@@ -72,6 +72,13 @@ CANARY_ERROR_RETRY_SECONDS  = 15 * 60
 # canary_failed gate while keeping last_canary_status=pass from a
 # prior run. After N errors in a row, treat as effective failure.
 CANARY_ERROR_STREAK_THRESHOLD = 3
+RECOVERABLE_CANARY_FLAG_REASONS = (
+    "canary_error_streak",
+    "canary_vram_fail",
+    "canary_bandwidth_low",
+    "canary_checksum_mismatch",
+    "canary_storage_fail",
+)
 
 
 def _is_validator_transient_canary_result(result: dict) -> bool:
@@ -507,13 +514,16 @@ class CanaryScheduler:
                     except Exception as e:
                         bt.logging.debug(f"canary_error_streak flag: {e}")
                 elif row.last_status == "pass":
-                    try:
-                        clear_open_sybil_flag(
-                            self._db, executor_id, "canary_error_streak",
-                            cleared_by="canary_pass",
-                        )
-                    except Exception as e:
-                        bt.logging.debug(f"clear canary_error_streak flag: {e}")
+                    # A clean canary pass supersedes previous canary-owned
+                    # hard findings for this executor, but not rental/SLA flags.
+                    for reason in RECOVERABLE_CANARY_FLAG_REASONS:
+                        try:
+                            clear_open_sybil_flag(
+                                self._db, executor_id, reason,
+                                cleared_by="canary_pass",
+                            )
+                        except Exception as e:
+                            bt.logging.debug(f"clear {reason} flag: {e}")
         except Exception as e:
             bt.logging.warning(f"_record_canary failed: {e}")
 
