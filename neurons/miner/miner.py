@@ -779,7 +779,7 @@ def _docker_image_present(image: str) -> bool:
     try:
         from common.images import image_runtime_reference
 
-        inspect_ref = image
+        inspect_ref = image_runtime_reference(image)
         result = _sp.run(
             ["docker", "image", "inspect", inspect_ref],
             shell=False,
@@ -787,16 +787,6 @@ def _docker_image_present(image: str) -> bool:
             text=True,
             timeout=10,
         )
-        if result.returncode != 0:
-            inspect_ref = image_runtime_reference(image)
-            if inspect_ref != image:
-                result = _sp.run(
-                    ["docker", "image", "inspect", inspect_ref],
-                    shell=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
         if result.returncode != 0:
             return False
         rows = json.loads(result.stdout or "[]")
@@ -820,12 +810,15 @@ def _docker_image_present(image: str) -> bool:
 def _pull_docker_image(image: str, timeout_s: int | None = None) -> bool:
     import subprocess as _sp
 
-    bt.logging.info(f"Pre-pulling rental image: {image}")
+    from common.images import image_runtime_reference
+
+    pull_ref = image_runtime_reference(image)
+    bt.logging.info(f"Pre-pulling rental image: {pull_ref}")
     if timeout_s is None:
         timeout_s = int(os.environ.get("MINER_IMAGE_PULL_TIMEOUT_S", "1800"))
     try:
         result = _sp.run(
-            ["docker", "pull", image],
+            ["docker", "pull", pull_ref],
             shell=False,
             capture_output=True,
             text=True,
@@ -835,9 +828,17 @@ def _pull_docker_image(image: str, timeout_s: int | None = None) -> bool:
         bt.logging.warning(f"Image pull failed for {image}: {e}")
         return False
     if result.returncode == 0:
+        if pull_ref != image:
+            _sp.run(
+                ["docker", "image", "tag", pull_ref, image],
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
         return True
     bt.logging.warning(
-        f"Image pull failed for {image}: {(result.stderr or result.stdout)[:400]}"
+        f"Image pull failed for {pull_ref}: {(result.stderr or result.stdout)[:400]}"
     )
     return False
 
@@ -846,8 +847,14 @@ def _remove_docker_image(image: str) -> None:
     import subprocess as _sp
 
     try:
+        from common.images import image_runtime_reference
+
+        refs = [image]
+        runtime_ref = image_runtime_reference(image)
+        if runtime_ref != image:
+            refs.append(runtime_ref)
         _sp.run(
-            ["docker", "image", "rm", image],
+            ["docker", "image", "rm", *refs],
             shell=False,
             capture_output=True,
             text=True,

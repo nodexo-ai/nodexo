@@ -541,6 +541,15 @@ print(image_pull_reserve_gb(sys.argv[1]))
 PY
 }
 
+image_runtime_reference() {
+    local img=$1
+    PYTHONPATH="$REPO_ROOT" python3 - "$img" <<'PY'
+import sys
+from common.images import image_runtime_reference
+print(image_runtime_reference(sys.argv[1]))
+PY
+}
+
 zkgemm_ext_suffix() {
     "$VENV_DIR/bin/python" - <<'PY'
 import sysconfig
@@ -959,7 +968,12 @@ fi
 pull_one() {
     local img=$1
     local mode=${2:-required}
-    if sh_run docker image inspect "$img" >/dev/null 2>&1; then
+    local runtime_ref
+    runtime_ref="$(image_runtime_reference "$img")"
+    if sh_run docker image inspect "$runtime_ref" >/dev/null 2>&1; then
+        if [[ "$runtime_ref" != "$img" ]]; then
+            sh_run docker image tag "$runtime_ref" "$img" >/dev/null 2>&1 || true
+        fi
         ok "image present: $img"
         return 0
     fi
@@ -973,12 +987,15 @@ pull_one() {
         warn "skipping $img; Docker storage has ${free_before}GB free, reserve is ${reserve}GB"
         return 2
     fi
-    log "pulling $img..."
-    if sh_run docker pull "$img"; then
+    log "pulling $runtime_ref..."
+    if sh_run docker pull "$runtime_ref"; then
+        if [[ "$runtime_ref" != "$img" ]]; then
+            sh_run docker image tag "$runtime_ref" "$img" >/dev/null 2>&1 || true
+        fi
         free_after="$(docker_storage_free_gb)"
         if [[ -n "$free_after" && "$free_after" -lt "$reserve" ]]; then
             warn "removing $img; pull left only ${free_after}GB free, reserve is ${reserve}GB"
-            sh_run docker image rm "$img" >/dev/null 2>&1 || true
+            sh_run docker image rm "$img" "$runtime_ref" >/dev/null 2>&1 || true
             return 2
         fi
         ok "pulled: $img"

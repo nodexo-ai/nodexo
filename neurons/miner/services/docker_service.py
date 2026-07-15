@@ -176,7 +176,10 @@ class DockerService:
                 if not DockerService._GPU_UUID_RE.match(u):
                     raise RuntimeError(f"Invalid GPU UUID: {u!r}")
 
-        expected_image_id = self._image_id(config.image)
+        from common.images import image_runtime_reference
+
+        run_image = image_runtime_reference(config.image)
+        expected_image_id = self._image_id(run_image)
         if not expected_image_id:
             raise RuntimeError(f"Docker image is not inspectable: {config.image}")
 
@@ -253,7 +256,7 @@ class DockerService:
         # exits immediately and `--restart=unless-stopped` makes it loop.
         # Renters who need real systemd should ship an image with their
         # own init and override CMD via the (future) container_command field.
-        cmd.append(config.image)
+        cmd.append(run_image)
         cmd.extend(["sleep", "infinity"])
 
         # Logged for operator audit. Argv list reads cleanly without quoting
@@ -288,7 +291,7 @@ class DockerService:
                 )
                 raise RuntimeError(
                     "Container image identity mismatch: "
-                    f"requested={config.image} expected={expected_image_id[:20]} "
+                    f"requested={run_image} expected={expected_image_id[:20]} "
                     f"got={container_image_id[:20]}"
                 )
 
@@ -329,7 +332,7 @@ class DockerService:
         try:
             from common.images import image_runtime_reference
 
-            inspect_ref = image
+            inspect_ref = image_runtime_reference(image)
             result = subprocess.run(
                 ["docker", "image", "inspect", inspect_ref],
                 shell=False,
@@ -337,16 +340,6 @@ class DockerService:
                 text=True,
                 timeout=10,
             )
-            if result.returncode != 0:
-                inspect_ref = image_runtime_reference(image)
-                if inspect_ref != image:
-                    result = subprocess.run(
-                        ["docker", "image", "inspect", inspect_ref],
-                        shell=False,
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                    )
             if result.returncode != 0:
                 return False
             import json
@@ -371,7 +364,7 @@ class DockerService:
         try:
             from common.images import image_runtime_reference
 
-            inspect_ref = image
+            inspect_ref = image_runtime_reference(image)
             result = subprocess.run(
                 ["docker", "image", "inspect", "--format", "{{.Id}}", inspect_ref],
                 shell=False,
@@ -379,16 +372,6 @@ class DockerService:
                 text=True,
                 timeout=10,
             )
-            if result.returncode != 0:
-                inspect_ref = image_runtime_reference(image)
-                if inspect_ref != image:
-                    result = subprocess.run(
-                        ["docker", "image", "inspect", "--format", "{{.Id}}", inspect_ref],
-                        shell=False,
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                    )
             if result.returncode != 0:
                 return ""
             return (result.stdout or "").strip()
