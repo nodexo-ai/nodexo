@@ -943,10 +943,18 @@ class BroadcastService:
         self._record_broadcast_results(posted_validators, results)
         self._prune_receipt_locks()
         success = sum(1 for r in results if r is True)
+        configured_failure = _has_configured_validator_failure(
+            posted_validators,
+            results,
+        )
         bt.logging.debug(
             f"Receipt broadcast: gpu={receipt.get('gpu_index', -1)} u={receipt.get('u', -1)} → {success}/{len(tasks)} validators"
         )
-        return {"success": success, "total": len(tasks)}
+        return {
+            "success": success,
+            "total": len(tasks),
+            "configured_failure": configured_failure,
+        }
 
     async def broadcast_commitment(self, commitment: ProofCommitment):
         """Phase A: broadcast pass_0 commitment to all validators."""
@@ -1025,6 +1033,10 @@ class BroadcastService:
         results = await self._run_broadcast_posts(tasks)
         self._record_broadcast_results(posted_validators, results)
         success = sum(1 for r in results if r is True)
+        configured_failure = _has_configured_validator_failure(
+            posted_validators,
+            results,
+        )
         # Log loud only when a configured validator missed the recipe. Peer
         # validators can have transient cache misses that do not require miner action.
         if tasks and success < len(tasks):
@@ -1032,7 +1044,7 @@ class BroadcastService:
                 f"Recipe broadcast partial: {success}/{len(tasks)} validators "
                 f"received (epoch={recipe['epoch_id']})"
             )
-            if _has_configured_validator_failure(posted_validators, results):
+            if configured_failure:
                 bt.logging.warning(msg)
             else:
                 bt.logging.info(f"{msg}; only non-configured validator(s) missed")
@@ -1040,7 +1052,11 @@ class BroadcastService:
             bt.logging.debug(
                 f"Recipe broadcast: {success}/{len(tasks)} validators received (epoch={recipe['epoch_id']})"
             )
-        return {"success": success, "total": len(tasks)}
+        return {
+            "success": success,
+            "total": len(tasks),
+            "configured_failure": configured_failure,
+        }
 
     async def broadcast_heartbeat(self, payload: dict):
         """Push hardware heartbeat to all validators."""

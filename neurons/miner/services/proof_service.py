@@ -272,6 +272,12 @@ def receipt_broadcast_outcome(outcome) -> tuple[bool, bool, int, int]:
     return True, success < total, success, total
 
 
+def broadcast_outcome_configured_failure(outcome) -> bool:
+    if not isinstance(outcome, dict):
+        return True
+    return bool(outcome.get("configured_failure", True))
+
+
 def _iter_gpu_worker_pids(executor_id: str) -> list[int]:
     """Return stale gpu_worker.py pids owned by this user.
 
@@ -1087,17 +1093,26 @@ class ProofService:
                         # and simple callbacks may return None; treat that as
                         # success for compatibility with local-only callbacks.
                         has_success, is_partial, success, total = receipt_broadcast_outcome(outcome)
+                        configured_failure = broadcast_outcome_configured_failure(outcome)
                         if not has_success:
-                            bt.logging.warning(
+                            message = (
                                 f"  Receipt broadcast incomplete: gpu={gpu_idx} "
                                 f"u={u} success={success}/{total}"
                             )
+                            if configured_failure:
+                                bt.logging.warning(message)
+                            else:
+                                bt.logging.info(f"{message}; only non-configured validator(s) missed")
                             return False
                         if is_partial:
-                            bt.logging.warning(
+                            message = (
                                 f"  Receipt broadcast partial: gpu={gpu_idx} "
                                 f"u={u} success={success}/{total}"
                             )
+                            if configured_failure:
+                                bt.logging.warning(message)
+                            else:
+                                bt.logging.info(f"{message}; only non-configured validator(s) missed")
                         return True
                     except Exception as e:
                         bt.logging.warning(
@@ -1384,10 +1399,14 @@ class ProofService:
                             total = int(recipe_outcome.get("total") or 0)
                             success = int(recipe_outcome.get("success") or 0)
                             if total <= 0 or success < total:
-                                bt.logging.warning(
+                                message = (
                                     f"Cycle {epoch_id}: recipe broadcast incomplete "
                                     f"({success}/{total})"
                                 )
+                                if broadcast_outcome_configured_failure(recipe_outcome):
+                                    bt.logging.warning(message)
+                                else:
+                                    bt.logging.info(f"{message}; only non-configured validator(s) missed")
 
                 # Cleanup temp dir
                 import shutil
