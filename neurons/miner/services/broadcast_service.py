@@ -134,6 +134,59 @@ def _is_native_validator(v: ValidatorEndpoint) -> bool:
     return str(getattr(v, "address", "") or "").startswith("axon:")
 
 
+def _validator_hotkey(v: ValidatorEndpoint) -> str:
+    hotkey = str(getattr(v, "hotkey_ss58", "") or "").strip()
+    if hotkey:
+        return hotkey
+    address = str(getattr(v, "address", "") or "")
+    if address.startswith("axon:"):
+        return address.split(":", 1)[1].strip()
+    return ""
+
+
+def _configured_validator_hotkeys() -> set[str]:
+    try:
+        from common.subnet_runtime_config import get_subnet_runtime_config
+        return {
+            str(hotkey or "").strip()
+            for hotkey in get_subnet_runtime_config().network.rental_validator_hotkeys
+            if str(hotkey or "").strip()
+        }
+    except Exception:
+        return set()
+
+
+def _is_configured_validator(v: ValidatorEndpoint) -> bool:
+    configured = _configured_validator_hotkeys()
+    if not configured:
+        return True
+    hotkey = _validator_hotkey(v)
+    if not hotkey:
+        return True
+    return hotkey in configured
+
+
+def _is_validator_cache_miss(status: int, body: str) -> bool:
+    if int(status or 0) != 503:
+        return False
+    text = str(body or "").lower()
+    return (
+        "executor registry cache unavailable" in text
+        or "hotkey ownership cache unavailable" in text
+        or "executor uid cache unavailable" in text
+    )
+
+
+def _has_configured_validator_failure(
+    validators: list[ValidatorEndpoint],
+    results: list,
+) -> bool:
+    return any(
+        result is not True and _is_configured_validator(validator)
+        for validator, result in zip(validators, results)
+    )
+
+
 def _has_evm_or_configured_validator(validators: list[ValidatorEndpoint]) -> bool:
     return any(not _is_native_validator(v) for v in validators or [])
 
@@ -240,6 +293,7 @@ class BroadcastService:
                     proxy_endpoint=str(row.get("proxy_endpoint") or ""),
                     uid=_validator_uid(row.get("uid")),
                     is_active=bool(row.get("is_active", True)),
+                    hotkey_ss58=str(row.get("hotkey_ss58") or ""),
                 )
                 for row in rows or []
                 if isinstance(row, dict)
@@ -677,6 +731,7 @@ class BroadcastService:
                     headers,
                     timeout=RECEIPT_REQUEST_TIMEOUT,
                     max_attempts=RECEIPT_POST_MAX_ATTEMPTS,
+                    validator=validator,
                 )
                 return result
             finally:
@@ -914,7 +969,10 @@ class BroadcastService:
                 continue
             url = f"{v.proxy_endpoint.rstrip('/')}/proofs/commit"
             # Send pre-serialized JSON (data=) NOT dict (json=) to match signed digest
-            tasks.append(self._post_raw(url, payload_json, v.address[:16], extra_headers))
+            tasks.append(self._post_raw(
+                url, payload_json, v.address[:16], extra_headers,
+                validator=v,
+            ))
             posted_validators.append(v)
         if not tasks:
             bt.logging.warning(
@@ -952,7 +1010,10 @@ class BroadcastService:
             if not v.proxy_endpoint:
                 continue
             url = f"{v.proxy_endpoint.rstrip('/')}/proofs/recipe"
-            tasks.append(self._post_raw(url, payload_json, v.address[:16], extra_headers))
+            tasks.append(self._post_raw(
+                url, payload_json, v.address[:16], extra_headers,
+                validator=v,
+            ))
             posted_validators.append(v)
         if not tasks:
             bt.logging.warning(
@@ -964,11 +1025,17 @@ class BroadcastService:
         results = await self._run_broadcast_posts(tasks)
         self._record_broadcast_results(posted_validators, results)
         success = sum(1 for r in results if r is True)
-        # Log loud only when not all targets succeeded — silent success is fine.
+        # Log loud only when a configured validator missed the recipe. Peer
+        # validators can have transient cache misses that do not require miner action.
         if tasks and success < len(tasks):
-            bt.logging.warning(
-                f"Recipe broadcast partial: {success}/{len(tasks)} validators received (epoch={recipe['epoch_id']})"
+            msg = (
+                f"Recipe broadcast partial: {success}/{len(tasks)} validators "
+                f"received (epoch={recipe['epoch_id']})"
             )
+            if _has_configured_validator_failure(posted_validators, results):
+                bt.logging.warning(msg)
+            else:
+                bt.logging.info(f"{msg}; only non-configured validator(s) missed")
         else:
             bt.logging.debug(
                 f"Recipe broadcast: {success}/{len(tasks)} validators received (epoch={recipe['epoch_id']})"
@@ -992,7 +1059,10 @@ class BroadcastService:
             if not v.proxy_endpoint:
                 continue
             url = f"{v.proxy_endpoint.rstrip('/')}/heartbeat"
-            tasks.append(self._post_raw(url, payload_json, v.address[:16], extra_headers))
+            tasks.append(self._post_raw(
+                url, payload_json, v.address[:16], extra_headers,
+                validator=v,
+            ))
             posted_validators.append(v)
 
         if tasks:
@@ -1012,6 +1082,7 @@ class BroadcastService:
         *,
         timeout: aiohttp.ClientTimeout | None = None,
         max_attempts: int | None = None,
+        validator: ValidatorEndpoint | None = None,
     ) -> bool | _BroadcastFailure:
         """POST pre-serialized JSON to a validator. Returns True on success.
 
@@ -1020,7 +1091,8 @@ class BroadcastService:
 
         Retries up to 2x on transient failures (timeout, connection error,
         5xx, 429). Permanent client errors (4xx other than 429) fail fast.
-        Intermediate failures log at DEBUG; only the final failure logs a WARNING.
+        Intermediate failures log at DEBUG. Final failures log a WARNING unless
+        the failure is a known cache miss from a non-configured validator.
         """
         max_attempts = max(1, int(
             POST_MAX_ATTEMPTS if max_attempts is None else max_attempts
@@ -1028,6 +1100,7 @@ class BroadcastService:
         backoff_s = 0.5
         last_err: str | None = None
         last_failure = _BroadcastFailure("transient")
+        last_nonconfigured_cache_miss = False
 
         for attempt in range(1, max_attempts + 1):
             try:
@@ -1043,6 +1116,11 @@ class BroadcastService:
                         return True
                     resp_body = await resp.text()
                     last_err = f"{resp.status}: {resp_body[:200]}"
+                    last_nonconfigured_cache_miss = (
+                        validator is not None
+                        and not _is_configured_validator(validator)
+                        and _is_validator_cache_miss(resp.status, resp_body)
+                    )
                     # 4xx (except 429) are permanent client errors — don't retry.
                     # 409 means a previous attempt reached the validator but
                     # the response was lost, so the broadcast succeeded.
@@ -1065,15 +1143,19 @@ class BroadcastService:
             except asyncio.TimeoutError:
                 last_err = "timed out"
                 last_failure = _BroadcastFailure("transient")
+                last_nonconfigured_cache_miss = False
             except aiohttp.ClientConnectorError as e:
                 last_err = str(e)
                 last_failure = _BroadcastFailure("transient")
+                last_nonconfigured_cache_miss = False
             except aiohttp.ClientOSError as e:
                 last_err = str(e)
                 last_failure = _BroadcastFailure("transient")
+                last_nonconfigured_cache_miss = False
             except Exception as e:
                 last_err = str(e)
                 last_failure = _BroadcastFailure("transient")
+                last_nonconfigured_cache_miss = False
 
             if attempt < max_attempts:
                 bt.logging.debug(
@@ -1082,7 +1164,13 @@ class BroadcastService:
                 await asyncio.sleep(backoff_s)
                 backoff_s *= 2
 
-        bt.logging.warning(f"POST {url} failed after {max_attempts} attempts: {last_err}")
+        msg = f"POST {url} failed after {max_attempts} attempts: {last_err}"
+        if last_nonconfigured_cache_miss:
+            bt.logging.info(
+                f"{msg}; non-configured validator cache miss, miner action not required"
+            )
+        else:
+            bt.logging.warning(msg)
         return last_failure
 
     async def _post(

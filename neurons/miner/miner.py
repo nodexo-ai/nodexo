@@ -192,6 +192,7 @@ def _validator_axon_endpoints_from_metagraph(
                 proxy_endpoint=endpoint,
                 uid=uid,
                 is_active=True,
+                hotkey_ss58=str(hotkeys[uid] or ""),
             ))
         except Exception:
             continue
@@ -232,11 +233,14 @@ def _validator_registry_endpoints_with_current_permit(validators: list, mg) -> l
     re-check the current permit set before broadcasting proofs.
     """
     kept = []
+    hotkeys = list(getattr(mg, "hotkeys", []) or [])
     for validator in validators or []:
         try:
             uid = _validator_uid(getattr(validator, "uid", None))
             if not _metagraph_validator_has_permit(mg, uid):
                 continue
+            if 0 <= uid < len(hotkeys):
+                validator.hotkey_ss58 = str(hotkeys[uid] or "")
             kept.append(validator)
         except Exception:
             continue

@@ -105,6 +105,7 @@ class ValidatorEndpoint:
     proxy_endpoint: str
     uid: int
     is_active: bool
+    hotkey_ss58: str = ""
 
 
 class ValidatorDiscoveryResult(list):
