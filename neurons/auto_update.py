@@ -228,6 +228,7 @@ class AutoUpdater:
         *,
         role: str,
         check_interval: int = 1800,
+        pending_retry_interval: int = 30,
         restart_delay: int = 5,
         busy_check: Optional[Callable[[], bool]] = None,
         jitter_seconds: int = 0,
@@ -235,6 +236,7 @@ class AutoUpdater:
     ):
         self.role = "miner" if role == "miner" else "validator"
         self.check_interval = max(60, int(check_interval))
+        self.pending_retry_interval = max(5, int(pending_retry_interval))
         self.restart_delay = max(0, int(restart_delay))
         self.busy_check = busy_check
         self.jitter_seconds = max(0, int(jitter_seconds))
@@ -283,10 +285,15 @@ class AutoUpdater:
                 self._check_once()
             except Exception as exc:
                 bt.logging.error(f"Auto-update check failed: {exc}")
-            self._wait(self.check_interval)
+            self._wait(self._next_wait_seconds())
 
     def _wait(self, seconds: int) -> None:
         self._stop_event.wait(timeout=seconds)
+
+    def _next_wait_seconds(self) -> int:
+        if self._update_pending or self._restart_pending:
+            return self.pending_retry_interval
+        return self.check_interval
 
     def _stagger_sleep(self) -> None:
         if self.jitter_seconds <= 0 or not self.jitter_seed:
