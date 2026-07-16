@@ -3350,11 +3350,24 @@ async def _scoring_loop():
 
             contexts = []
             stake_owner_by_executor: dict[str, str] = {}
+            allocation_rented_ids: set[str] = set()
+            try:
+                from common.allocation_client import get_snapshot
+                from common.subnet_runtime_config import get_subnet_runtime_config
+                if get_subnet_runtime_config().allocation.read_mode != "chain":
+                    allocation_snapshot = get_snapshot()
+                    if allocation_snapshot.is_fresh():
+                        allocation_rented_ids = set(allocation_snapshot.active)
+            except Exception as e:
+                bt.logging.debug(f"scoring: allocation rented lookup failed: {e}")
+
             for spec in execs:
                 gpu_model = _name_for_hash(spec.gpu_model_hash)
                 hotkey_ss58 = executor_hotkeys.get(spec.executor_id, "")
                 coldkey_ss58 = coldkey_by_hotkey.get(hotkey_ss58, "") if hotkey_ss58 else ""
                 stake_owner = coldkey_ss58 or hotkey_ss58
+                executor_id_norm = str(spec.executor_id).lower().removeprefix("0x")
+                is_rented = bool(spec.is_rented) or executor_id_norm in allocation_rented_ids
 
                 miner_stake_tao = (
                     stake_by_coldkey.get(coldkey_ss58, 0.0)
@@ -3367,7 +3380,7 @@ async def _scoring_loop():
                     hotkey_ss58=hotkey_ss58,
                     gpu_model=gpu_model,
                     gpu_count=spec.gpu_count,
-                    is_rented=spec.is_rented,
+                    is_rented=is_rented,
                     is_active=spec.is_active,
                     db=db, now_ts=now_ts,
                     miner_stake_tao=miner_stake_tao,

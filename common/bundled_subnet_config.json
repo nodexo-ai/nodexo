@@ -76,6 +76,7 @@
   "scoring": {
     "heartbeat_recency_s": 300,
     "idle_fraction": 0.2,
+    "min_miner_version": 0,
     "min_miner_stake_tao": 0,
     "min_reliability_gate": 0.67,
     "min_reliability_samples": 5,

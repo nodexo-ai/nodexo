@@ -83,6 +83,7 @@ from __future__ import annotations
 
 import calendar
 import os
+import re
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Optional
 
@@ -161,6 +162,7 @@ class ScoringContext:
     miner_address: str = ""               # EVM address when known
     miner_uid: int | None = None          # metagraph UID when known
     endpoint: str = ""                    # registered executor endpoint
+    software_version: str = ""
     miner_stake_tao: float = 0.0          # mg.stake[uid] in subnet alpha; 0 if unresolved
     miner_required_stake_tao: float | None = None # aggregate owner requirement supplied by scoring loop
     pass_rate_1h: float = 1.0             # recent proof reliability
@@ -184,6 +186,7 @@ class ScoringConfig:
     # "if available, must not fail" check rather than a hard prereq).
     # The validator wires this from os.environ in _scoring_loop.
     canary_required:     bool  = True
+    min_miner_version: int = 0
     # Minimum miner-side subnet alpha stake for the executor to be eligible.
     # Zeroes score AND blocks /rent. 0.0 disables the gate. See
     # DEFAULT_MIN_MINER_STAKE_TAO for the rationale.
@@ -233,6 +236,7 @@ def scoring_config_from_runtime(*, canary_required: bool) -> ScoringConfig:
         heartbeat_recency_s=runtime.heartbeat_recency_s,
         idle_fraction=runtime.idle_fraction,
         canary_required=canary_required,
+        min_miner_version=runtime.min_miner_version,
         min_miner_stake_tao=runtime.min_miner_stake_tao if min_stake is None else min_stake,
         stake_per_score_tao=runtime.stake_per_score_tao,
         stake_gpu_count_exponent=runtime.stake_gpu_count_exponent,
@@ -304,6 +308,31 @@ def _proof_sample_count(ctx: ScoringContext) -> int:
     return max(0, int(ctx.samples_1h or 0), int(ctx.samples_24h or 0))
 
 
+def parse_software_version(value: str | int | None) -> int:
+    """Return encoded MAJOR.MINOR.PATCH version, or 0 for unknown."""
+    if value is None:
+        return 0
+    if isinstance(value, int):
+        return max(0, value)
+    raw = str(value or "").strip()
+    if not raw:
+        return 0
+    if raw.isdigit():
+        return max(0, int(raw))
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", raw)
+    if not match:
+        return 0
+    major, minor, patch = (int(part) for part in match.groups())
+    return major * 1_000_000 + minor * 1_000 + patch
+
+
+def miner_version_gate_passes(ctx: ScoringContext, cfg: ScoringConfig) -> bool:
+    required = int(cfg.min_miner_version or 0)
+    if required <= 0 or ctx.is_rented:
+        return True
+    return parse_software_version(ctx.software_version) >= required
+
+
 def _has_min_proof_samples(ctx: ScoringContext, cfg: ScoringConfig) -> bool:
     required = int(cfg.min_reliability_samples or 0)
     return required <= 0 or _proof_sample_count(ctx) >= required
@@ -334,6 +363,8 @@ def stake_requirement_eligible(ctx: ScoringContext, cfg: Optional[ScoringConfig]
     if not _has_min_proof_samples(ctx, cfg):
         return False
     if not ctx.rental_runtime_ok:
+        return False
+    if not miner_version_gate_passes(ctx, cfg):
         return False
     age_hb = max(
         0.0,
@@ -432,6 +463,18 @@ def score_one(ctx: ScoringContext, cfg: Optional[ScoringConfig] = None) -> Scori
         passed.append("rental_runtime")
     else:
         failed.append("rental_runtime (sysbox missing)")
+
+    required_miner_version = int(cfg.min_miner_version or 0)
+    if required_miner_version > 0:
+        miner_version = parse_software_version(ctx.software_version)
+        if ctx.is_rented:
+            passed.append(f"miner_version_rented_grace={miner_version}")
+        elif miner_version >= required_miner_version:
+            passed.append(f"miner_version={miner_version}")
+        else:
+            failed.append(
+                f"miner_version ({miner_version} < {required_miner_version})"
+            )
 
     # Gate C — recent heartbeat
     age_hb_raw = ctx.now_ts - (ctx.last_heartbeat_at or 0)
@@ -598,6 +641,7 @@ def build_context_from_db(executor_id: str, hotkey_ss58: str, gpu_model: str,
     rental_runtime_ok = True
     validator_outage_since_proof_s = 0.0
     validator_outage_since_heartbeat_s = 0.0
+    software_version = ""
     try:
         from common.db import ExecutorHardware, ExecutorStats
         with db.session() as s:
@@ -634,6 +678,7 @@ def build_context_from_db(executor_id: str, hotkey_ss58: str, gpu_model: str,
             hw = s.query(ExecutorHardware).filter_by(executor_id=executor_id).first()
             if hw is not None:
                 rental_runtime_ok = bool(hw.sysbox_detected)
+                software_version = hw.software_version or ""
 
             flag_count = s.query(SybilFlag).filter(
                 SybilFlag.executor_id == executor_id,
@@ -681,6 +726,7 @@ def build_context_from_db(executor_id: str, hotkey_ss58: str, gpu_model: str,
         miner_address=miner_address,
         miner_uid=miner_uid,
         endpoint=endpoint,
+        software_version=software_version,
         pass_rate_1h=pass_rate_1h,
         pass_rate_24h=pass_rate_24h,
         samples_1h=samples_1h,
@@ -733,6 +779,8 @@ def executor_state(ctx: ScoringContext, cfg: Optional[ScoringConfig] = None) -> 
         return EXECUTOR_STATE_BANNED
     if ctx.open_hard_flag_count > 0 or ctx.last_canary_status == "fail":
         return EXECUTOR_STATE_BANNED
+    if not miner_version_gate_passes(ctx, cfg):
+        return EXECUTOR_STATE_STALE
     if cfg.canary_required and ctx.last_canary_status != "pass":
         return EXECUTOR_STATE_CANARY_PENDING
     proof_fresh = (

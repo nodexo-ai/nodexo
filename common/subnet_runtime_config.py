@@ -65,6 +65,7 @@ class ScoringRuntimeConfig:
     proof_recency_s: int = 600
     heartbeat_recency_s: int = 300
     idle_fraction: float = 0.20
+    min_miner_version: int = 0
     min_miner_stake_tao: float = 0.0
     stake_per_score_tao: float = 1.0
     stake_gpu_count_exponent: float = 1.0
@@ -240,6 +241,13 @@ def _parse_scoring(raw: Any) -> ScoringRuntimeConfig:
             default=0.20,
             min_value=0.0,
             max_value=1.0,
+        ),
+        min_miner_version=_coerce_int(
+            raw.get("min_miner_version"),
+            name="scoring.min_miner_version",
+            default=0,
+            min_value=0,
+            max_value=1_000_000_000,
         ),
         min_miner_stake_tao=_coerce_float(
             raw.get("min_miner_stake_tao"),
