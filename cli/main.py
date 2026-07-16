@@ -214,7 +214,7 @@ def _select_wallet(default_wallet: str = "", default_hotkey: str = "",
 
 def _wallet_hotkey_ss58(wallet_name: str, hotkey_name: str) -> str:
     import json
-    from substrateinterface.utils.ss58 import ss58_encode
+    from bittensor.utils import ss58_encode
 
     hotkey_path = Path.home() / ".bittensor" / "wallets" / wallet_name / "hotkeys" / hotkey_name
     data = json.loads(hotkey_path.read_text(encoding="utf-8"))
@@ -2232,7 +2232,6 @@ def cmd_operator_claim(args):
         print("  Usage: nodexo operator-claim sign --message-base64 <challenge>", file=sys.stderr)
         _exit(2)
 
-    from substrateinterface import Keypair
     from common.chain.wallet import load_hotkey_seed
     import bittensor as bt
     import json
@@ -2263,10 +2262,10 @@ def cmd_operator_claim(args):
         _exit(1)
 
     seed = load_hotkey_seed(args.wallet, args.hotkey)
-    keypair = Keypair.create_from_seed(seed[:32].hex())
+    keypair = bt.Keypair.create_from_seed(seed[:32].hex())
     raw_sig = keypair.sign(message.encode("utf-8"))
     sig_bytes = raw_sig if isinstance(raw_sig, bytes) else bytes.fromhex(str(raw_sig).replace("0x", ""))
-    verifier = Keypair(ss58_address=local_hotkey)
+    verifier = bt.Keypair(ss58_address=local_hotkey)
     if not verifier.verify(message.encode("utf-8"), sig_bytes):
         print("  Local signature verification failed.", file=sys.stderr)
         _exit(1)

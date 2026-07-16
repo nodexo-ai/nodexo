@@ -557,7 +557,7 @@ async def _fetch_chain_context(session, validator_urls: list[str],
     the chain RPC; the monitor never speaks to the chain directly. This
     is intentional:
       - No bittensor / no substrate dep in the monitor image (avoids
-        the scalecodec / cyscale conflict that broke us once already).
+        the scalecodec / cyscale dependency conflict).
       - The miner can't lie to the monitor about block numbers, because
         the monitor never asks the miner — it asks the validator.
       - The validator can't lie to the monitor about block numbers in

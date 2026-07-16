@@ -1,12 +1,11 @@
 # Nodexo — Python dependencies
 
 # Core
-bittensor>=8.0.0,<10.3
-bittensor-cli==9.20.0
+bittensor==10.5.0
+bittensor-cli==9.23.2
 web3>=7.0.0
 eth-account>=0.13.0
 eth-abi>=5.0.0
-substrate-interface>=1.7.0
 SQLAlchemy>=2.0.0
 psycopg2-binary>=2.9.9
 

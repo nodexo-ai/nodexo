@@ -28,7 +28,7 @@ def sign_evm_registration(
     Message: keccak256(abi.encodePacked(msg.sender, uid, netuid, address(this)))
 
     """
-    from substrateinterface import Keypair
+    import bittensor as bt
 
     evm_bytes = bytes.fromhex(evm_address[2:])     # 20 bytes
     uid_bytes = uid.to_bytes(2, "big")              # uint16
@@ -38,7 +38,7 @@ def sign_evm_registration(
     packed = evm_bytes + uid_bytes + netuid_bytes + contract_bytes
     message = Web3.keccak(packed)
 
-    keypair = Keypair.create_from_seed(hotkey_seed[:32].hex())
+    keypair = bt.Keypair.create_from_seed(hotkey_seed[:32].hex())
     signature = keypair.sign(message)
 
     sig_bytes = signature if isinstance(signature, bytes) else bytes.fromhex(
@@ -77,7 +77,7 @@ def get_ss58_mirror_address(evm_address: str) -> str:
     mirror_account_id = blake2b_256(b"evm:" + h160_bytes)
 
     """
-    from substrateinterface.utils.ss58 import ss58_encode
+    from bittensor.utils import ss58_encode
 
     h160 = bytes.fromhex(evm_address.lower().replace("0x", ""))
     assert len(h160) == 20, f"Invalid EVM address length: {len(h160)}"
@@ -90,8 +90,7 @@ def get_ss58_mirror_address(evm_address: str) -> str:
 def load_hotkey_seed(wallet_name: str, hotkey_name: str = "default") -> bytes:
     """Load the hotkey seed from a Bittensor wallet on disk.
 
-    Handles both old (substrateinterface) and new (bittensor-wallet Rust)
-    Keypair implementations.
+    Handles both current and legacy Bittensor keyfile formats.
 
     Args:
         wallet_name: Bittensor wallet name (e.g., "miner").

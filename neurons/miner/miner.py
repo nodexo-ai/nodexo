@@ -1370,11 +1370,11 @@ def _monitor_seed_for_executor(executor_id: str, hotkey_seed: bytes) -> bytes:
 
 
 def _monitor_owner_env(executor_id: str, hotkey_seed: bytes) -> tuple[str, dict[str, str]]:
-    from substrateinterface import Keypair
+    import bittensor as bt
     from common.crypto import monitor_binding_body, sign_payload
 
     monitor_seed = _monitor_seed_for_executor(executor_id, hotkey_seed)
-    monitor_hotkey = Keypair.create_from_seed(monitor_seed.hex()).ss58_address
+    monitor_hotkey = bt.Keypair.create_from_seed(monitor_seed.hex()).ss58_address
     binding_body = monitor_binding_body(executor_id, monitor_hotkey)
     signed = sign_payload(binding_body, hotkey_seed)
     return monitor_hotkey, {

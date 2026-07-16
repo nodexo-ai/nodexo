@@ -50,9 +50,7 @@ def sign_payload(payload_bytes: bytes, hotkey_seed: bytes) -> dict[str, str]:
     Returns:
         Dict of headers to add to the HTTP request.
     """
-    from substrateinterface import Keypair
-
-    keypair = Keypair.create_from_seed(hotkey_seed.hex())
+    keypair = bt.Keypair.create_from_seed(hotkey_seed.hex())
     timestamp = str(int(time.time()))
     nonce = secrets.token_hex(16)
 
@@ -109,8 +107,6 @@ def verify_signature(
     Returns:
         True if signature is valid and request is fresh.
     """
-    from substrateinterface import Keypair
-
     # Check freshness for ordinary request signatures. Long-lived
     # delegation signatures can pass max_age=None when the signed body
     # itself is intentionally reusable and tightly scoped.
@@ -131,7 +127,7 @@ def verify_signature(
     # Verify
     try:
         signature = bytes.fromhex(sig_hex)
-        keypair = Keypair(ss58_address=hotkey_ss58)
+        keypair = bt.Keypair(ss58_address=hotkey_ss58)
         return keypair.verify(digest, signature)
     except Exception as e:
         bt.logging.warning(f"Signature verification failed: {e}")

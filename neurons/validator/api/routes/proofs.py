@@ -136,7 +136,7 @@ except Exception:
 
 
 def _hotkey_account_id_bytes(hotkey_ss58: str) -> bytes:
-    from substrateinterface.utils.ss58 import ss58_decode
+    from bittensor.utils import ss58_decode
 
     decoded = ss58_decode(hotkey_ss58)
     return bytes.fromhex(decoded.removeprefix("0x"))
