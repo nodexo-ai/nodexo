@@ -95,7 +95,9 @@ class ZkGemmBlockProver:
         Returns:
             Merkle root (32 bytes).
         """
-        import zkgemm_cuda as zk
+        from zkgemm.native_import import import_zkgemm_cuda
+
+        zk = import_zkgemm_cuda()
 
         # Generate A, B from PRF seed
         self.A = zk.philox_generate_field(self.seed, self.n, 0, self.device)

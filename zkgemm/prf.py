@@ -13,9 +13,10 @@ from __future__ import annotations
 import os
 
 from zkgemm.field import P
+from zkgemm.native_import import import_zkgemm_cuda
 
 try:
-    import zkgemm_cuda as _zk
+    _zk = import_zkgemm_cuda()
     _HAS_NATIVE = True
 except ImportError:
     _HAS_NATIVE = False

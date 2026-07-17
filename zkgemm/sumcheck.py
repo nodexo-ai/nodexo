@@ -18,10 +18,11 @@ from dataclasses import dataclass
 
 from zkgemm.field import P, add, sub, mul, div, inv
 from zkgemm.mle import update_table
+from zkgemm.native_import import import_zkgemm_cuda
 from zkgemm.transcript import Transcript
 
 try:
-    import zkgemm_cuda as _zk
+    _zk = import_zkgemm_cuda()
     _HAS_NATIVE = True
 except ImportError:
     _HAS_NATIVE = False

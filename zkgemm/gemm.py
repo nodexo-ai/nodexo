@@ -23,6 +23,7 @@ from zkgemm.mle import (
 )
 from zkgemm.sumcheck import SumcheckProof, sumcheck_prove, sumcheck_verify
 from zkgemm.transcript import Transcript
+from zkgemm.native_import import import_zkgemm_cuda
 
 try:
     import numpy as np
@@ -31,7 +32,7 @@ except ImportError:
     _HAS_NUMPY = False
 
 try:
-    import zkgemm_cuda as _zk
+    _zk = import_zkgemm_cuda()
     _HAS_NATIVE = True
 except ImportError:
     _HAS_NATIVE = False
