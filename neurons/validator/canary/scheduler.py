@@ -87,14 +87,17 @@ def _is_validator_transient_canary_result(result: dict) -> bool:
 
     These attempts are operationally important, but they are not miner canary
     errors. Counting them toward canary_error_streak hides honest hardware when
-    the public EVM RPC is rate-limited.
+    the allocation control plane rejects or cannot complete the lock.
     """
     if result.get("status") != "error":
         return False
     reason = str(result.get("reason") or "").lower()
-    # markRented is validator-side chain control-plane work that happens
+    # Allocation locking is validator-side control-plane work that happens
     # before the canary reaches the miner. Any failure here means the canary
     # never tested the executor, so it must not count as miner sabotage.
+    if "allocation lock failed" in reason:
+        return True
+    # Legacy chain-write wording from older lock paths.
     if "markrented failed" in reason:
         return True
     if "runner crashed" not in reason:
@@ -273,10 +276,24 @@ class CanaryScheduler:
         if not execs:
             return None
 
-        # Apply exclusions: rented, exclude-list, loopback endpoint
+        api_busy_ids: set[str] = set()
+        try:
+            from common.allocation_client import get_snapshot
+            from common.subnet_runtime_config import get_subnet_runtime_config
+            if get_subnet_runtime_config().allocation.read_mode != "chain":
+                allocation_snapshot = get_snapshot()
+                if not allocation_snapshot.is_fresh():
+                    return None
+                api_busy_ids = set(allocation_snapshot.active)
+        except Exception as e:
+            bt.logging.debug(f"CanaryScheduler allocation busy lookup failed: {e}")
+            return None
+
+        # Apply exclusions: rented/busy, exclude-list, loopback endpoint
         candidates = []
         for e in execs:
-            if getattr(e, "is_rented", False):
+            eid = str(e.executor_id or "").lower().removeprefix("0x")
+            if getattr(e, "is_rented", False) or eid in api_busy_ids:
                 continue
             if e.executor_id.lower() in self._exclude:
                 bt.logging.debug(
