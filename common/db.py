@@ -1688,13 +1688,13 @@ def terminate_rental(db: Database, rental_id: str, reason: str = "user", end_blo
         rental = s.query(Rental).filter_by(rental_id=rental_id).first()
         if not rental:
             return
-        now = datetime.utcnow()
-        rental.terminated_at = now
+        ended_at = rental.release_requested_at or datetime.utcnow()
+        rental.terminated_at = ended_at
         rental.status = f"terminated_{reason}" if reason else "terminated"
         rental.release_reason = ""
         rental.last_release_error = ""
         if rental.created_at:
-            rental.actual_seconds = int((now - rental.created_at).total_seconds())
+            rental.actual_seconds = max(0, int((ended_at - rental.created_at).total_seconds()))
         if end_block:
             rental.end_block = end_block
         # Billing: price_per_gpu_hour_rao × gpu_count × hours_actual.

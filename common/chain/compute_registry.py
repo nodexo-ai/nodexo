@@ -81,6 +81,15 @@ def _view_rpc_retries() -> int:
         return 4
 
 
+def _replacement_gas_price_floor_wei() -> int:
+    """Minimum legacy gas price for replacing an invisible known transaction."""
+    raw = os.environ.get("EVM_TX_REPLACEMENT_MIN_GWEI", "30")
+    try:
+        return max(0, int(float(raw) * 1_000_000_000))
+    except Exception:
+        return 30_000_000_000
+
+
 def _is_transient_rpc_error(exc: Exception) -> bool:
     msg = str(exc)
     return (
@@ -201,6 +210,7 @@ class ComputeRegistryClient:
         # Phase a: get to a submitted tx_hash, with retries.
         last_exc: Exception | None = None
         tx_hash = None
+        replacement_gas_floor = 0
         for attempt in range(5):
             signed_hash = None
             try:
@@ -213,6 +223,8 @@ class ComputeRegistryClient:
                     # actually pending; if the node merely cached a dropped raw
                     # tx, the changed gas price also changes the raw hash.
                     gas_price = int(gas_price * (1.15 ** attempt))
+                if replacement_gas_floor:
+                    gas_price = max(gas_price, replacement_gas_floor)
                 tx = fn.build_transaction({
                     "from": self.address,
                     "nonce": self._rpc_call(
@@ -250,6 +262,7 @@ class ComputeRegistryClient:
                     except Exception:
                         pass
                     if attempt < 4:
+                        replacement_gas_floor = _replacement_gas_price_floor_wei()
                         bt.logging.warning(
                             f"{label or getattr(fn, 'fn_name', 'tx')} already known by RPC "
                             "but no receipt is visible; retrying with gas bump"
