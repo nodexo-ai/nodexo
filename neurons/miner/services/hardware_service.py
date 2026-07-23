@@ -16,6 +16,7 @@ import threading
 import time
 import urllib.request
 import uuid as uuid_mod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,11 @@ _NETWORK_FS_TYPES = {
     "lustre", "9p", "virtiofs",
 }
 
+# Optional GPU subset filter. Set at most ONE of these to run several miner
+# instances on a single host, each owning a disjoint slice of the GPUs.
+GPU_UUIDS_ENV = "NODEXO_GPU_UUIDS"
+GPU_INDICES_ENV = "NODEXO_GPU_INDICES"
+
 
 @dataclass
 class GpuInfo:
@@ -59,8 +65,219 @@ class SystemInfo:
     os_version: str
 
 
-def detect_gpus() -> list[GpuInfo]:
-    """Detect all NVIDIA GPUs via pynvml."""
+def _normalize_gpu_uuid(raw: str) -> str:
+    """Canonical form used to compare GPU UUIDs.
+
+    NVML reports ``GPU-<hex>``; operators copy them around with or without
+    that prefix and in either case. Compare on the bare lowercase hex.
+    """
+    token = raw.strip().lower()
+    if token.startswith("gpu-"):
+        token = token[len("gpu-"):]
+    return token
+
+
+def _parse_gpu_filter_env(
+    env: Mapping[str, str] | None = None,
+) -> tuple[list[str], list[int]]:
+    """Read the GPU subset filter from the environment.
+
+    Parsing is lenient: entries are whitespace-stripped and empty entries
+    are dropped, so ``"0, 1,"`` means the same as ``"0,1"``.
+
+    Args:
+        env: mapping to read from; defaults to ``os.environ``.
+
+    Returns:
+        ``(uuids, indices)``. Either or both may be empty, meaning "no
+        filter of that kind".
+
+    Raises:
+        ValueError: if an entry of ``NODEXO_GPU_INDICES`` is not an integer.
+    """
+    src = os.environ if env is None else env
+
+    uuids = [tok.strip() for tok in src.get(GPU_UUIDS_ENV, "").split(",")]
+    uuids = [tok for tok in uuids if tok]
+    _reject_duplicates(uuids, GPU_UUIDS_ENV, _normalize_gpu_uuid)
+
+    indices: list[int] = []
+    for tok in src.get(GPU_INDICES_ENV, "").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            indices.append(int(tok))
+        except ValueError:
+            raise ValueError(
+                f"{GPU_INDICES_ENV} entry is not an integer: {tok!r}"
+            ) from None
+    _reject_duplicates(indices, GPU_INDICES_ENV)
+
+    return uuids, indices
+
+
+def _reject_duplicates(
+    entries: list,
+    label: str,
+    key=lambda x: x,
+) -> None:
+    """Raise if a filter list names the same GPU twice.
+
+    ``NODEXO_GPU_INDICES="0,0"`` is a plausible typo for ``"0,1"`` and would
+    otherwise be silently deduped into a one-GPU executor. Everywhere else
+    this filter fails closed on operator error; be consistent here.
+    """
+    seen = set()
+    for entry in entries:
+        token = key(entry)
+        if token in seen:
+            raise ValueError(f"{label} names the same GPU twice: {entry!r}")
+        seen.add(token)
+
+
+def select_gpu_subset(
+    gpus: list[GpuInfo],
+    *,
+    uuids: list[str] | None = None,
+    indices: list[int] | None = None,
+    strict: bool = True,
+) -> list[GpuInfo]:
+    """Narrow a detected GPU list down to an operator-selected subset.
+
+    This is what lets one physical host be split into several independently
+    rentable executors: point each miner instance at a disjoint subset and
+    ``get_or_create_executor_id()`` derives a distinct identity per instance.
+    NVML ignores ``CUDA_VISIBLE_DEVICES``, so without this filter every
+    instance on a host would enumerate every GPU and collide on one
+    executor_id.
+
+    Args:
+        gpus: GPUs as enumerated by NVML, in physical index order.
+        uuids: GPU UUIDs to keep. Matched case-insensitively, with or
+            without the ``GPU-`` prefix.
+        indices: physical NVML indices to keep.
+        strict: when True (the default) a requested UUID/index that is not
+            present is an error. When False the missing entries are dropped
+            and whatever survives is returned — used for the periodic
+            hardware refresh, where a device that has transiently vanished
+            (Xid, driver reset, ECC retirement) must not turn into a
+            broadcast claiming zero GPUs.
+
+    Returns:
+        The kept GPUs in their original NVML order, as a new list. Each
+        ``GpuInfo.index`` keeps its PHYSICAL NVML value — subsets are never
+        renumbered, because that index is the key into the per-physical-GPU
+        MIG map assembled in :func:`build_hw_static`.
+
+        Note that the physical index is NOT what pins proof workers today:
+        ``ProofService`` receives only a GPU *count* and walks
+        ``range(gpu_count)``, so proof slot k always runs on CUDA device k
+        (see :func:`_assert_proof_slot_mapping_safe`).
+
+    Raises:
+        ValueError: if both filters are supplied, if a filter names the same
+            GPU twice, if the selection ends up empty, or — when ``strict``
+            — if any requested UUID or index is absent. This fails closed on
+            purpose: registering a GPU set other than the one the operator
+            asked for is exactly the sybil condition validators ban (see
+            neurons/validator/sybil/scanner.py).
+    """
+    if uuids and indices:
+        raise ValueError(
+            f"Set only one of {GPU_UUIDS_ENV} and {GPU_INDICES_ENV}, not both"
+        )
+    if not uuids and not indices:
+        return list(gpus)
+
+    if uuids:
+        available = {_normalize_gpu_uuid(g.uuid) for g in gpus}
+        missing = [u for u in uuids if _normalize_gpu_uuid(u) not in available]
+        if missing:
+            message = (
+                f"requested GPU UUID(s) not present on this host: "
+                f"{', '.join(missing)} — detected: "
+                f"{', '.join(g.uuid for g in gpus) or '(none)'}"
+            )
+            if strict:
+                raise ValueError(message)
+            bt.logging.warning(f"GPU subset refresh: {message}")
+        wanted_uuids = {_normalize_gpu_uuid(u) for u in uuids}
+        selected = [g for g in gpus if _normalize_gpu_uuid(g.uuid) in wanted_uuids]
+    else:
+        available_idx = {g.index for g in gpus}
+        missing_idx = [i for i in indices if i not in available_idx]
+        if missing_idx:
+            message = (
+                f"requested GPU index/indices not present on this host: "
+                f"{', '.join(str(i) for i in missing_idx)} — detected: "
+                f"{', '.join(str(g.index) for g in gpus) or '(none)'}"
+            )
+            if strict:
+                raise ValueError(message)
+            bt.logging.warning(f"GPU subset refresh: {message}")
+        wanted_idx = set(indices)
+        selected = [g for g in gpus if g.index in wanted_idx]
+
+    if not selected:
+        raise ValueError("GPU subset selection matched no GPU")
+
+    return selected
+
+
+def _assert_proof_slot_mapping_safe(selected: list[GpuInfo]) -> None:
+    """Refuse a subset whose physical indices are not exactly ``0..n-1``.
+
+    ``ProofService`` is constructed with a GPU *count*, not a device list
+    (neurons/miner/miner.py, ``gpu_count=len(gpus)``). It then iterates
+    ``for gpu_idx in range(self.gpu_count)`` and launches each worker with
+    ``CUDA_VISIBLE_DEVICES=str(gpu_idx)`` (proof_service.py ``_worker_env``),
+    an absolute overwrite the operator cannot pre-empt. So proof slot k runs
+    on CUDA device k no matter which physical GPUs this executor selected.
+
+    An executor holding NVML indices 4..7 would therefore prove on physical
+    GPUs 0..3 — its neighbour's silicon. The proofs still *verify* (the
+    validator re-derives the seed from the reported 0-based slot), but the
+    wrong hardware did the work: the neighbour's rentals are disturbed and
+    both executors trip the timing and canary gates.
+
+    Until ProofService accepts the selected device list, only a subset that
+    already starts at physical 0 and is contiguous is safe, so that the
+    slot->device mapping is the identity. That permits "mine on the first N
+    of my GPUs" but blocks the multi-instance split.
+    """
+    physical = [g.index for g in selected]
+    if physical == list(range(len(physical))):
+        return
+    raise ValueError(
+        "GPU subset {"
+        + ",".join(str(i) for i in physical)
+        + "} is not supported: proof workers are pinned by ordinal position "
+        "(CUDA_VISIBLE_DEVICES=<slot>, slot in range(gpu_count)), not by "
+        "physical index, so this executor would run its proofs on physical "
+        "GPU(s) " + ",".join(str(i) for i in range(len(physical)))
+        + " — hardware it does not own. Only a subset covering physical "
+        "indices 0..n-1 is safe today. Splitting a host across several "
+        "executors additionally needs ProofService to take the selected "
+        "device list; see docs/multi-executor.md."
+    )
+
+
+def detect_gpus(strict: bool = True) -> list[GpuInfo]:
+    """Detect all NVIDIA GPUs via pynvml.
+
+    If ``NODEXO_GPU_UUIDS`` or ``NODEXO_GPU_INDICES`` is set, only that
+    subset is returned (see :func:`select_gpu_subset`). With neither set the
+    full device list is returned, exactly as before.
+
+    Args:
+        strict: startup semantics. True means a bad or unsatisfiable filter
+            yields ``[]`` so the miner refuses to start, and the subset must
+            pass :func:`_assert_proof_slot_mapping_safe`. False is for the
+            periodic hardware refresh: the filter is applied best-effort and
+            a device that has gone missing is dropped with a warning rather
+            than collapsing the report to "this host has no GPUs".
+    """
     try:
         import pynvml
         pynvml.nvmlInit()
@@ -90,10 +307,29 @@ def detect_gpus() -> list[GpuInfo]:
                 compute_capability=f"{major}.{minor}",
             ))
         pynvml.nvmlShutdown()
-        return gpus
     except Exception as e:
         bt.logging.error(f"GPU detection failed: {e}")
         return []
+
+    try:
+        want_uuids, want_indices = _parse_gpu_filter_env()
+        selected = select_gpu_subset(
+            gpus, uuids=want_uuids, indices=want_indices, strict=strict,
+        )
+        if strict and (want_uuids or want_indices):
+            _assert_proof_slot_mapping_safe(selected)
+    except ValueError as e:
+        # Fail closed: better to report no GPU (the miner refuses to start)
+        # than to register a set the operator did not ask for.
+        bt.logging.error(f"GPU subset selection failed: {e}")
+        return []
+
+    if len(selected) != len(gpus):
+        bt.logging.info(
+            f"GPU subset: {len(selected)} of {len(gpus)} selected "
+            f"(indices {','.join(str(g.index) for g in selected)})"
+        )
+    return selected
 
 
 def detect_system() -> SystemInfo:
@@ -185,27 +421,38 @@ def detect_mig_for_gpu(handle) -> dict:
     return out
 
 
-def detect_mig_summary() -> dict:
-    """Top-level MIG summary across all physical GPUs. Goes into
-    `hw_static` so the validator can route MIG-isolated executors
+def detect_mig_summary(indices: list[int] | None = None) -> dict:
+    """Top-level MIG summary across this executor's physical GPUs. Goes
+    into `hw_static` so the validator can route MIG-isolated executors
     to a higher-tier marketplace listing without re-querying.
+
+    Args:
+        indices: physical NVML indices to report on. ``None`` (the default)
+            means every GPU on the host. Pass this executor's own indices
+            when a GPU subset filter is in play — ``capable_any`` and
+            ``enabled_any`` drive marketplace tier selection, so computing
+            them across a co-tenant's GPUs would advertise this executor
+            into the isolated tier on someone else's MIG configuration.
 
     Returns:
       {
-        "capable_any": bool,   # at least one GPU supports MIG
-        "enabled_any": bool,   # at least one GPU has MIG mode active
-        "per_gpu": [           # one entry per physical GPU
+        "capable_any": bool,   # at least one reported GPU supports MIG
+        "enabled_any": bool,   # at least one reported GPU has MIG active
+        "per_gpu": [           # one entry per reported physical GPU
             {"index": 0, "capable": ..., "enabled": ..., "devices": [...]},
             ...
         ],
       }
     """
     out = {"capable_any": False, "enabled_any": False, "per_gpu": []}
+    wanted = None if indices is None else set(indices)
     try:
         import pynvml
         pynvml.nvmlInit()
         count = pynvml.nvmlDeviceGetCount()
         for i in range(count):
+            if wanted is not None and i not in wanted:
+                continue
             handle = pynvml.nvmlDeviceGetHandleByIndex(i)
             info = detect_mig_for_gpu(handle)
             info["index"] = i
@@ -220,8 +467,51 @@ def detect_mig_summary() -> dict:
     return out
 
 
+def _env_selected_nvml_indices(pynvml, count: int) -> set[int] | None:
+    """Resolve the configured GPU filter to a set of physical NVML indices.
+
+    Returns ``None`` when no filter is configured or the configuration is
+    unusable, meaning "report every GPU" — the pre-filter behaviour. The
+    unfiltered path issues no extra NVML calls and gains no new failure
+    mode. This is telemetry, not identity, so it degrades to best-effort
+    rather than failing closed; :func:`detect_gpus` is the gate that stops a
+    miner with a broken filter from starting at all.
+    """
+    try:
+        want_uuids, want_indices = _parse_gpu_filter_env()
+    except ValueError:
+        return None
+    if want_uuids and want_indices:
+        return None
+    if want_indices:
+        return {i for i in want_indices if 0 <= i < count}
+    if not want_uuids:
+        return None
+
+    wanted = {_normalize_gpu_uuid(u) for u in want_uuids}
+    selected: set[int] = set()
+    for i in range(count):
+        try:
+            raw_uuid = pynvml.nvmlDeviceGetUUID(
+                pynvml.nvmlDeviceGetHandleByIndex(i)
+            )
+        except Exception:
+            continue
+        if isinstance(raw_uuid, bytes):
+            raw_uuid = raw_uuid.decode("utf-8")
+        if _normalize_gpu_uuid(raw_uuid) in wanted:
+            selected.add(i)
+    return selected
+
+
 def get_gpu_utilization() -> list[dict]:
     """Get current per-GPU utilization, memory, temp, and power.
+
+    Scoped to this executor's GPU subset when ``NODEXO_GPU_UUIDS`` or
+    ``NODEXO_GPU_INDICES`` is set; with neither set, every GPU on the host
+    is reported exactly as before. Without that scoping a one-GPU executor
+    on a split host would return eight rows here while `hardware_info`
+    carries one, and a renter would be shown a co-tenant's workload.
 
     Used by:
       - Idle checks inside the miner.
@@ -234,8 +524,11 @@ def get_gpu_utilization() -> list[dict]:
         import pynvml
         pynvml.nvmlInit()
         count = pynvml.nvmlDeviceGetCount()
+        selected = _env_selected_nvml_indices(pynvml, count)
         utils = []
         for i in range(count):
+            if selected is not None and i not in selected:
+                continue
             handle = pynvml.nvmlDeviceGetHandleByIndex(i)
             util = pynvml.nvmlDeviceGetUtilizationRates(handle)
             mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
@@ -725,7 +1018,22 @@ def get_or_create_executor_id(gpus: list[GpuInfo]) -> str:
     Changing GPUs changes the executor_id, requiring re-registration.
 
     Stable executor identity pattern (see protocol design notes).
+
+    Raises:
+        ValueError: if ``gpus`` is empty. detect_gpus() returns [] both when
+            NVML fails and when a GPU subset filter is rejected; persisting
+            an identity from that would overwrite a registered executor's
+            executor_identity.json with an empty gpu_uuids list on nothing
+            worse than a typo in NODEXO_GPU_UUIDS.
     """
+    if not gpus:
+        raise ValueError(
+            "refusing to derive an executor identity from an empty GPU list — "
+            "GPU detection returned nothing. Check the log for 'GPU detection "
+            f"failed' or 'GPU subset selection failed', and verify "
+            f"{GPU_UUIDS_ENV}/{GPU_INDICES_ENV} if you have set them."
+        )
+
     IDENTITY_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         IDENTITY_PATH.parent.chmod(0o700)
@@ -871,7 +1179,10 @@ def build_hw_static(gpus: list[GpuInfo] = None, sys_info: SystemInfo = None) -> 
     Called once at startup (or when hardware changes).
     """
     if gpus is None:
-        gpus = detect_gpus()
+        # strict=False: this runs on the periodic heartbeat refresh too, and
+        # a device that has transiently vanished must not turn the broadcast
+        # into a claim of zero GPUs. Startup uses the strict path.
+        gpus = detect_gpus(strict=False)
     if sys_info is None:
         sys_info = detect_system()
 
@@ -879,7 +1190,10 @@ def build_hw_static(gpus: list[GpuInfo] = None, sys_info: SystemInfo = None) -> 
     storage = detect_storage()
     docker_storage = storage.get("docker") or {}
 
-    mig_summary = detect_mig_summary()
+    # Scoped to this executor's GPUs: mig_capable_any/mig_enabled_any below
+    # drive validator-side marketplace tier filtering, and must not inherit
+    # a co-tenant instance's MIG configuration on a split host.
+    mig_summary = detect_mig_summary([g.index for g in gpus])
     # Build a per-GPU MIG info map keyed by index so the gpus list can
     # carry "mig" alongside the existing fields. Cheaper than nesting a
     # second lookup table on the validator side.
