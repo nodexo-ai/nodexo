@@ -32,8 +32,9 @@ DEFAULT_GPU_HOURLY_PRICE: dict[str, float] = {
     "NVIDIA GeForce RTX 4080": 0.30,
     "NVIDIA GeForce RTX 4080 SUPER": 0.32,
     "NVIDIA GeForce RTX 4090": 0.69,
-    "NVIDIA GeForce RTX 5090": 0.55,
+    "NVIDIA GeForce RTX 5090": 0.89,
     "NVIDIA RTX 6000 Ada Generation": 0.85,
+    "NVIDIA RTX PRO 6000 Blackwell Server Edition": 1.79,
     "NVIDIA RTX A6000": 0.49,
     "NVIDIA A100-SXM4-40GB": 0.80,
     "NVIDIA A100-PCIE-40GB": 0.80,
@@ -43,9 +44,9 @@ DEFAULT_GPU_HOURLY_PRICE: dict[str, float] = {
     "NVIDIA L40S": 1.20,
     "NVIDIA H100 80GB HBM3": 2.89,
     "NVIDIA H100 NVL": 2.80,
-    "NVIDIA H200": 3.50,
+    "NVIDIA H200": 3.95,
     "NVIDIA H200 NVL": 3.50,
-    "NVIDIA B200": 5.00,
+    "NVIDIA B200": 5.30,
     "NVIDIA B300 SXM6": 6.00,
 }
 DEFAULT_PRICE_PER_HOUR = 0.10

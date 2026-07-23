@@ -1,4 +1,17 @@
 {
+  "allocation": {
+    "admin_hotkeys": [
+      "5D7FVSM1fJM56zHJuMBuQ5LH32mkLni52JonoeppFrezvyHy"
+    ],
+    "authority_hotkey": "5D7FVSM1fJM56zHJuMBuQ5LH32mkLni52JonoeppFrezvyHy",
+    "max_snapshot_age_seconds": 90,
+    "read_mode": "dual",
+    "status_url": "https://nodexo.ai/api/allocation",
+    "write_mode": "api",
+    "writer_hotkeys": [
+      "5D7FVSM1fJM56zHJuMBuQ5LH32mkLni52JonoeppFrezvyHy"
+    ]
+  },
   "blacklist": {
     "active_rental_policy": "terminate",
     "endpoint_hosts": [],
@@ -8,9 +21,10 @@
     "uids": []
   },
   "canary": {
+    "attestation_sources": [],
     "error_retry_seconds": 900,
-    "error_streak_threshold": 3,
-    "mean_seconds": 86400
+    "error_streak_threshold": 6,
+    "mean_seconds": 14400
   },
   "conviction": {
     "allowance_enabled": true,
@@ -26,15 +40,6 @@
       "5D7FVSM1fJM56zHJuMBuQ5LH32mkLni52JonoeppFrezvyHy"
     ]
   },
-  "allocation": {
-    "admin_hotkeys": [],
-    "authority_hotkey": "",
-    "max_snapshot_age_seconds": 90,
-    "read_mode": "dual",
-    "status_url": "https://nodexo.ai/api/allocation",
-    "write_mode": "chain",
-    "writer_hotkeys": []
-  },
   "pricing": {
     "default_price_per_hour": 0.1,
     "gpu_hourly_price": {
@@ -42,7 +47,7 @@
       "NVIDIA A100-PCIE-40GB": 0.8,
       "NVIDIA A100-SXM4-40GB": 0.8,
       "NVIDIA A100-SXM4-80GB": 1.49,
-      "NVIDIA B200": 5,
+      "NVIDIA B200": 5.3,
       "NVIDIA B300 SXM6": 6,
       "NVIDIA GeForce RTX 3060": 0.1,
       "NVIDIA GeForce RTX 3060 Ti": 0.1,
@@ -59,14 +64,15 @@
       "NVIDIA GeForce RTX 4080": 0.3,
       "NVIDIA GeForce RTX 4080 SUPER": 0.32,
       "NVIDIA GeForce RTX 4090": 0.69,
-      "NVIDIA GeForce RTX 5090": 0.55,
+      "NVIDIA GeForce RTX 5090": 0.89,
       "NVIDIA H100 80GB HBM3": 2.89,
       "NVIDIA H100 NVL": 2.8,
-      "NVIDIA H200": 3.5,
+      "NVIDIA H200": 3.95,
       "NVIDIA H200 NVL": 3.5,
       "NVIDIA L40": 1,
       "NVIDIA L40S": 1.2,
       "NVIDIA RTX 6000 Ada Generation": 0.85,
+      "NVIDIA RTX PRO 6000 Blackwell Server Edition": 1.79,
       "NVIDIA RTX A6000": 0.49
     },
     "renter_quote_multiplier": 1
@@ -75,14 +81,14 @@
   "schema_version": 1,
   "scoring": {
     "heartbeat_recency_s": 300,
-    "idle_fraction": 0.2,
-    "min_miner_version": 0,
+    "idle_fraction": 0.8,
     "min_miner_stake_tao": 0,
+    "min_miner_version": 1001,
     "min_reliability_gate": 0.67,
     "min_reliability_samples": 5,
     "proof_recency_s": 600,
     "reliability_exponent": 2,
-    "reliability_miss_grace_slots": 20,
+    "reliability_miss_grace_slots": 30,
     "stake_gpu_count_exponent": 1,
     "stake_grace_until_ts": 1781017982,
     "stake_per_score_tao": 1,
@@ -141,9 +147,10 @@
       "calibrated": true,
       "calibrated_gpu_counts": [
         1,
+        2,
         4
       ],
-      "provenance": "production calibrated fit 2026-06-16 from validator DB p99/mean+2sd free samples (n=42, counts=1,4)",
+      "provenance": "production fit retained; testnet-468 2x validation 2026-07-23 (n=37); counts=1,2,4",
       "receipt_spread_grace": 8,
       "tol1": 1.1,
       "tol2": 1.1,
@@ -152,11 +159,13 @@
     "NVIDIA B200": {
       "a1": 0.142857,
       "a2": 0,
-      "base1": 6,
-      "base2": 14,
-      "calibrated": false,
-      "calibrated_gpu_counts": [],
-      "provenance": "extrapolated (Blackwell 192GB) - not measured; recalibrate before mainnet",
+      "base1": 9.47,
+      "base2": 14.543,
+      "calibrated": true,
+      "calibrated_gpu_counts": [
+        1
+      ],
+      "provenance": "testnet-468 calibrated fit 2026-07-23 from validator DB p99/mean+2sd free samples (n=25, counts=1)",
       "receipt_spread_grace": 8,
       "tol1": 1.1,
       "tol2": 1.1,
@@ -373,13 +382,16 @@
       "wall_grace": 8
     },
     "NVIDIA GeForce RTX 5090": {
-      "a1": 0.142857,
+      "a1": 0.734672,
       "a2": 0,
-      "base1": 1.5,
-      "base2": 3.5,
-      "calibrated": false,
-      "calibrated_gpu_counts": [],
-      "provenance": "extrapolated (~900 TOPS, N=18432, 32GB) - recalibrate before mainnet",
+      "base1": 2.072,
+      "base2": 1.974,
+      "calibrated": true,
+      "calibrated_gpu_counts": [
+        1,
+        4
+      ],
+      "provenance": "testnet-468 calibrated fit 2026-07-23 from validator DB p99/mean+2sd free samples (n=56, counts=1,4)",
       "receipt_spread_grace": 5,
       "tol1": 1.1,
       "tol2": 1.1,
@@ -393,9 +405,11 @@
       "calibrated": true,
       "calibrated_gpu_counts": [
         1,
-        2
+        2,
+        4,
+        8
       ],
-      "provenance": "production calibrated fit 2026-06-16 from validator DB p99/mean+2sd free samples (n=21, counts=2)",
+      "provenance": "testnet-468 validation 2026-07-22; production fit retained; 4x n=26 and 8x n=30 passed existing deadlines",
       "receipt_spread_grace": 8,
       "tol1": 1.2,
       "tol2": 1.35,
@@ -415,13 +429,18 @@
       "wall_grace": 12
     },
     "NVIDIA H200": {
-      "a1": 0.142857,
+      "a1": 0.009917,
       "a2": 0,
-      "base1": 8,
-      "base2": 18,
-      "calibrated": false,
-      "calibrated_gpu_counts": [],
-      "provenance": "extrapolated (H200 141GB) - not measured; recalibrate before mainnet",
+      "base1": 11.006,
+      "base2": 16.356,
+      "calibrated": true,
+      "calibrated_gpu_counts": [
+        1,
+        2,
+        4,
+        8
+      ],
+      "provenance": "testnet-468 calibrated fit 2026-07-23 from validator DB p99/mean+2sd free samples (n=149, counts=1,2,4,8)",
       "receipt_spread_grace": 8,
       "tol1": 1.1,
       "tol2": 1.1,
@@ -479,6 +498,23 @@
       "tol2": 1.1,
       "wall_grace": 9
     },
+    "NVIDIA RTX PRO 6000 Blackwell Server Edition": {
+      "a1": 0,
+      "a2": 0.000824,
+      "base1": 8.262,
+      "base2": 0.001,
+      "calibrated": true,
+      "calibrated_gpu_counts": [
+        1,
+        2,
+        4
+      ],
+      "provenance": "testnet-468 calibrated fit 2026-07-23 from validator DB p99/mean+2sd free samples (n=144, counts=1,2,4)",
+      "receipt_spread_grace": 12,
+      "tol1": 1.1,
+      "tol2": 1.1,
+      "wall_grace": 30
+    },
     "NVIDIA RTX A6000": {
       "a1": 0.142857,
       "a2": 0,
@@ -508,11 +544,11 @@
       "wall_grace": 30
     }
   },
-  "updated_at": "2026-06-23T15:58:37.000Z",
-  "version": 35,
+  "updated_at": "2026-07-23T13:04:07Z",
+  "version": 51,
   "weights": {
     "burn_uid": 0,
-    "emission_burn_fraction": 0.8,
+    "emission_burn_fraction": 0.7,
     "set_weights_interval_blocks": 360
   }
 }
